@@ -1,0 +1,7 @@
+# sixmem requirements
+
+# No mandatory dependencies for the core scripts (stdlib only).
+# Optional: for extended features, uncomment below.
+
+# requests>=2.28.0    # alternative HTTP client (stdlib urllib is used by default)
+# pyyaml>=6.0         # if you want YAML-based config parsing

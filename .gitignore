@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Memory data (never commit)
+memory/
+*.jsonl
+*.log
+data/
+
+# Environment
+.env
+.env.local
+*.env
+
+# Obsidian
+.knowledge-base/
