@@ -27,7 +27,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # === 配置（通过环境变量覆盖） ===
-MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".sixmem"))
+MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 SESSIONS_DIR = Path(os.environ.get("MEM_SESSIONS_DIR", MEMORY_HOME / "sessions"))
 MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", MEMORY_HOME / "memory"))
 UNIFIED_FACTS = MEMORY_DIR / "unified-facts.jsonl"

@@ -1,8 +1,8 @@
-# 六层记忆架构 (sixmem)
+# 六层记忆架构 (coremem)
 
 ## 概述
 
-sixmem 是一套 AI Agent 长期记忆的六层架构参考实现。数据从原始会话日志逐层向上编译，最终形成可检索、可演化的知识图谱。
+coremem 是一套 AI Agent 长期记忆的六层架构参考实现。数据从原始会话日志逐层向上编译，最终形成可检索、可演化的知识图谱。
 
 ## 六层数据流
 
@@ -117,7 +117,7 @@ MEMORY.md 分为两个独立区块：
 
 | 环境变量 | 用途 | 默认值 |
 |----------|------|--------|
-| `MEMORY_HOME` | 记忆系统根目录 | `~/.sixmem` |
+| `MEMORY_HOME` | 记忆系统根目录 | `~/.coremem` |
 | `MEM_SEMANTIC_BASE_URL` | 语义索引后端地址 | `http://127.0.0.1:<PORT>` |
 | `MEM_SEMANTIC_API_KEY` | 语义索引 API Key | 空 |
 | `MEM_SEMANTIC_GRAPH_ID` | 语义索引图 ID | `default` |

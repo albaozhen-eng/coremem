@@ -37,7 +37,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # === 配置（通过环境变量覆盖） ===
-MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".sixmem"))
+MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 _ED = os.environ.get("MEM_DATA_DIR", "").strip()
 DATA_DIR = Path(_ED) if _ED else MEMORY_HOME / "data"
 TZ = timezone(timedelta(hours=8))

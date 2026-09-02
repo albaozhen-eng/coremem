@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 # === 配置（通过环境变量覆盖） ===
-MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".sixmem"))
+MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 BUFFER_PATH = DATA_DIR / "memory_buffer.jsonl"
 CODE_MEM_PATH = DATA_DIR / "codex_memory_buffer.jsonl"

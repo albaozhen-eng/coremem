@@ -18,7 +18,7 @@ remember.py — 记忆统一写入入口 v1.0
 
 配置：
   所有路径和连接信息通过环境变量配置，默认值如下：
-  - MEMORY_HOME: 记忆系统根目录（默认 ~/.sixmem）
+  - MEMORY_HOME: 记忆系统根目录（默认 ~/.coremem）
   - MEM_SEMANTIC_BASE_URL: 语义索引后端地址（默认 http://127.0.0.1:8089）
   - MEM_SEMANTIC_API_KEY: 语义索引 API Key（默认空）
   - MEM_SEMANTIC_GRAPH_ID: 语义索引图 ID（默认 default）
@@ -35,7 +35,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # === 配置（通过环境变量覆盖） ===
-MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".sixmem"))
+MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", MEMORY_HOME / "memory"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 BUFFER_FILE = DATA_DIR / "memory_buffer.jsonl"

@@ -1,7 +1,7 @@
-# sixmem
+# coremem
 
 > **六层记忆架构的参考实现骨架**——设计哲学 + 工具脚本，用于 AI Agent 的长期记忆管理。
-> 名字暂定 `sixmem`，可改。
+> 正式命名 `coremem`。
 
 ## 一句话定位
 
@@ -61,7 +61,7 @@ python3 src/remember.py --status
 ## 目录结构
 
 ```
-sixmem/
+coremem/
 ├── README.md
 ├── LICENSE
 ├── CHANGELOG.md

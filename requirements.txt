@@ -1,4 +1,4 @@
-# sixmem requirements
+# coremem requirements
 
 # No mandatory dependencies for the core scripts (stdlib only).
 # Optional: for extended features, uncomment below.

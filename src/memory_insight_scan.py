@@ -33,7 +33,7 @@ from pathlib import Path
 from collections import defaultdict
 
 # === 配置（通过环境变量覆盖） ===
-MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".sixmem"))
+MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 MEMORY_MD = Path(os.environ.get("MEM_MEMORY_MD", MEMORY_HOME / "MEMORY.md"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 
