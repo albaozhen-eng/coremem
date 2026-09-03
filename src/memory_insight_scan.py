@@ -20,6 +20,8 @@ memory_insight_scan.py v1.0 — 语义索引 → MEMORY.md AUTO 区块同步器
   所有路径和连接信息通过环境变量配置。
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -30,6 +32,8 @@ import urllib.error
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+from plugmem_config import plugmem_cfg
 from collections import defaultdict
 
 # === 配置（通过环境变量覆盖） ===
@@ -37,9 +41,10 @@ MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 MEMORY_MD = Path(os.environ.get("MEM_MEMORY_MD", MEMORY_HOME / "MEMORY.md"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 
-SEMANTIC_BASE_URL = os.environ.get("MEM_SEMANTIC_BASE_URL", "http://127.0.0.1:8089")
-SEMANTIC_API_KEY = os.environ.get("MEM_SEMANTIC_API_KEY", "")
-SEMANTIC_GRAPH_ID = os.environ.get("MEM_SEMANTIC_GRAPH_ID", "default")
+_PC = plugmem_cfg()  # env > ~/.openclaw/openclaw.json > default
+SEMANTIC_BASE_URL = _PC["base_url"]
+SEMANTIC_API_KEY = _PC["api_key"]
+SEMANTIC_GRAPH_ID = _PC["graph_id"]
 
 PLUGMEM_TIMEOUT = 15  # seconds
 

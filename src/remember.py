@@ -25,6 +25,8 @@ remember.py — 记忆统一写入入口 v1.0
   - MEM_DATA_DIR: 数据目录（默认 $MEMORY_HOME/data）
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -34,6 +36,8 @@ import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from plugmem_config import plugmem_cfg
+
 # === 配置（通过环境变量覆盖） ===
 MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", MEMORY_HOME / "memory"))
@@ -41,9 +45,10 @@ DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 BUFFER_FILE = DATA_DIR / "memory_buffer.jsonl"
 UNIFIED_FACTS_FILE = MEMORY_DIR / "unified-facts.jsonl"
 
-SEMANTIC_BASE_URL = os.environ.get("MEM_SEMANTIC_BASE_URL", "http://127.0.0.1:8089")
-SEMANTIC_API_KEY = os.environ.get("MEM_SEMANTIC_API_KEY", "")
-SEMANTIC_GRAPH_ID = os.environ.get("MEM_SEMANTIC_GRAPH_ID", "default")
+_PC = plugmem_cfg()  # env > ~/.openclaw/openclaw.json > default
+SEMANTIC_BASE_URL = _PC["base_url"]
+SEMANTIC_API_KEY = _PC["api_key"]
+SEMANTIC_GRAPH_ID = _PC["graph_id"]
 
 PLUGMEM_TIMEOUT = 15  # seconds
 

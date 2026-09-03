@@ -24,6 +24,8 @@ morning_briefing.py — 晨间记忆简报（纯确定性，零 LLM）
   所有路径和连接信息通过环境变量配置。
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -36,6 +38,8 @@ from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from plugmem_config import plugmem_cfg
+
 # === 配置（通过环境变量覆盖） ===
 MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 _ED = os.environ.get("MEM_DATA_DIR", "").strip()
@@ -43,9 +47,10 @@ DATA_DIR = Path(_ED) if _ED else MEMORY_HOME / "data"
 TZ = timezone(timedelta(hours=8))
 PLUGMEM_TIMEOUT = 15
 
-SEMANTIC_BASE_URL = os.environ.get("MEM_SEMANTIC_BASE_URL", "http://127.0.0.1:8089")
-SEMANTIC_API_KEY = os.environ.get("MEM_SEMANTIC_API_KEY", "")
-SEMANTIC_GRAPH_ID = os.environ.get("MEM_SEMANTIC_GRAPH_ID", "default")
+_PC = plugmem_cfg()  # env > ~/.openclaw/openclaw.json > default
+SEMANTIC_BASE_URL = _PC["base_url"]
+SEMANTIC_API_KEY = _PC["api_key"]
+SEMANTIC_GRAPH_ID = _PC["graph_id"]
 
 # 分数目录
 _ESCAPE = os.environ.get("MEM_SCORES_DIR", "").strip()

@@ -15,8 +15,11 @@ memory_recall.py v3.0 — 记忆检索工具（全层搜索 + Skill 层 + RRF �
   所有路径和连接信息通过环境变量配置。
 """
 
+from __future__ import annotations
+
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -25,6 +28,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+from plugmem_config import plugmem_cfg
 
 # === 配置（通过环境变量覆盖） ===
 MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
@@ -38,9 +43,10 @@ ALIASES_FILE = DATA_DIR / "search_aliases.json"
 SCORES_FILE = DATA_DIR / "memory_scores" / "scores.json"
 DECAY_POLICY_FILE = DATA_DIR / "decay_policy.json"
 
-SEMANTIC_BASE_URL = os.environ.get("MEM_SEMANTIC_BASE_URL", "http://127.0.0.1:8089")
-SEMANTIC_API_KEY = os.environ.get("MEM_SEMANTIC_API_KEY", "")
-SEMANTIC_GRAPH_ID = os.environ.get("MEM_SEMANTIC_GRAPH_ID", "default")
+_PC = plugmem_cfg()  # env > ~/.openclaw/openclaw.json > default
+SEMANTIC_BASE_URL = _PC["base_url"]
+SEMANTIC_API_KEY = _PC["api_key"]
+SEMANTIC_GRAPH_ID = _PC["graph_id"]
 
 DEFAULT_HOURS = 48
 ESCALATE_HOURS = 720

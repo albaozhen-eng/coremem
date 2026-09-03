@@ -15,6 +15,8 @@
   所有路径和连接信息通过环境变量配置。
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -23,26 +25,31 @@ import urllib.error
 from datetime import datetime
 from pathlib import Path
 
+from plugmem_config import plugmem_cfg
+
 # === 配置（通过环境变量覆盖） ===
 MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 BUFFER_PATH = DATA_DIR / "memory_buffer.jsonl"
 CODE_MEM_PATH = DATA_DIR / "codex_memory_buffer.jsonl"
 
-SEMANTIC_BASE_URL = os.environ.get("MEM_SEMANTIC_BASE_URL", "http://127.0.0.1:8089")
-SEMANTIC_API_KEY = os.environ.get("MEM_SEMANTIC_API_KEY", "")
-SEMANTIC_GRAPH_ID = os.environ.get("MEM_SEMANTIC_GRAPH_ID", "default")
+_PC = plugmem_cfg()  # env > ~/.openclaw/openclaw.json > default
+SEMANTIC_BASE_URL = _PC["base_url"]
+SEMANTIC_API_KEY = _PC["api_key"]
+SEMANTIC_GRAPH_ID = _PC["graph_id"]
 
 
-def _http_write_memory(text: str) -> bool:
+def _http_write_memory(text: str, tags=None) -> bool:
     """直连语义索引后端 API 写入"""
     url = f"{SEMANTIC_BASE_URL}/api/v1/graphs/{SEMANTIC_GRAPH_ID}/memories"
+    # source 必须是 PlugMem 枚举值（failure_delta/correction/merged/repeated_lookup/explicit/business）
+    # 曾用 "buffer_flush" → 422 且被静默吞掉，缓冲重试永远失败。降级重放按显式事实入库。
     payload = {
         "mode": "structured",
         "semantic": [{
             "semantic_memory": text,
-            "tags": [],
-            "source": "buffer_flush",
+            "tags": tags or [],
+            "source": "explicit",
             "confidence": 0.7,
         }],
     }
@@ -54,7 +61,11 @@ def _http_write_memory(text: str) -> bool:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.status == 200
-    except Exception:
+    except urllib.error.HTTPError as e:
+        print(f"  ↳ HTTP {e.code}: {e.read()[:200].decode(errors='replace')}", file=sys.stderr)
+        return False
+    except Exception as e:
+        print(f"  ↳ {type(e).__name__}: {e}", file=sys.stderr)
         return False
 
 
@@ -117,7 +128,7 @@ def flush_buffer(buffer_path=None):
         if not text:
             continue
         try:
-            if _http_write_memory(text):
+            if _http_write_memory(text, entry.get("tags") if isinstance(entry, dict) else None):
                 success += 1
             else:
                 fail += 1

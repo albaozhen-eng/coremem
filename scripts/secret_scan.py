@@ -159,6 +159,7 @@ def main():
     )
     parser.add_argument("directory", nargs="?", default=".", help="扫描目录（默认当前目录）")
     parser.add_argument("--check", action="store_true", help="pre-commit hook 模式（静默扫描）")
+    parser.add_argument("--tracked", action="store_true", help="只扫描 git 跟踪的文件（尊重 .gitignore，hook 推荐）")
     args = parser.parse_args()
 
     target = args.directory if args.directory else "."
@@ -166,7 +167,17 @@ def main():
         print(f"❌ 目录不存在: {target}", file=sys.stderr)
         sys.exit(2)
 
-    hits = scan_directory(target, check_mode=args.check)
+    if args.tracked:
+        import subprocess
+        out = subprocess.run(["git", "ls-files"], cwd=target, capture_output=True, text=True)
+        files = [Path(target) / f for f in out.stdout.splitlines()]
+        all_hits = []
+        for fp in files:
+            if fp.is_file() and not should_exclude(fp.relative_to(Path(target).resolve() if Path(target).is_absolute() else Path(target).resolve())):
+                all_hits.extend(scan_file(fp))
+        hits = all_hits
+    else:
+        hits = scan_directory(target, check_mode=args.check)
 
     if hits:
         print(f"\n❌ 发现 {len(hits)} 条疑似敏感信息:")

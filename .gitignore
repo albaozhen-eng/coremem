@@ -36,3 +36,5 @@ data/
 
 # Obsidian
 .knowledge-base/
+# 机器专属部署配置（含本机路径，勿入库）
+coremem.env
