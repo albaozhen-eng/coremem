@@ -1,0 +1,7 @@
+{
+  "_comment": "OpenClaw 工作区机器（workspace-main / agents/main/sessions / brian-main）",
+  "_note": "PATCHES 硬编码值即为此机默认值，无需额外替换。DATA_DIR 统一指向 plugmem/data 以消除双 buffer。",
+  "replacements": {
+    "os.environ.get(\"MEM_DATA_DIR\", MEMORY_HOME / \"data\")": "os.environ.get(\"MEM_DATA_DIR\", Path.home() / \".plugmem\" / \"data\")"
+  }
+}

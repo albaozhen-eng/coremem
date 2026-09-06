@@ -1,0 +1,7 @@
+{
+  "_comment": "plugmem-suite 独立部署机（~/.plugmem/workspace/memory, ~/.plugmem/data）",
+  "replacements": {
+    "\".openclaw\" / \"workspace-main\"": "\".plugmem\" / \"workspace\"",
+    "os.environ.get(\"MEM_DATA_DIR\", MEMORY_HOME / \"data\")": "os.environ.get(\"MEM_DATA_DIR\", Path.home() / \".plugmem\" / \"data\")"
+  }
+}
