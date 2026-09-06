@@ -50,7 +50,7 @@ PATCHES = [
 ]
 
 FILES = ["plugmem_config.py", "remember.py", "memory_recall.py", "memory_write_buffer.py",
-         "memory_insight_scan.py", "morning_briefing.py"]
+         "memory_insight_scan.py", "morning_briefing.py", "vault_export.py"]
 
 dest.mkdir(parents=True, exist_ok=True)
 report = []

@@ -12,13 +12,13 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 BAK="$DEST/.backup/coremem_predeploy_$STAMP"
 
 mkdir -p "$BAK"
-for f in plugmem_config.py remember.py memory_recall.py memory_write_buffer.py memory_insight_scan.py morning_briefing.py; do
+for f in plugmem_config.py remember.py memory_recall.py memory_write_buffer.py memory_insight_scan.py morning_briefing.py vault_export.py; do
   [ -f "$DEST/$f" ] && cp -p "$DEST/$f" "$BAK/" || true
 done
 echo "✓ 旧版已备份到 $BAK"
 
 python3 "$REPO/deploy/patch_deploy.py" "$REPO" "$DEST" --profile "$PROFILE"
-chmod 600 "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py "$DEST"/secret_scan.py 2>/dev/null || true
+chmod 600 "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py "$DEST"/vault_export.py "$DEST"/secret_scan.py 2>/dev/null || true
 echo "✓ 生产脚本已更新（默认值=现网路径，env 可覆盖）"
 
 # pre-commit hook → coremem 仓库自身（发布/同步前隐私闸门：拦 /Users/ 路径、真实域名、手机号、key）
@@ -34,7 +34,7 @@ HOOK
 fi
 
 # 语法自检
-for f in "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py; do
+for f in "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py "$DEST"/vault_export.py; do
   python3 -m py_compile "$f" && echo "✓ syntax ok: $(basename "$f")"
 done
 
