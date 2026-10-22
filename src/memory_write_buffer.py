@@ -26,7 +26,7 @@ import urllib.error
 from datetime import datetime
 from pathlib import Path
 
-from plugmem_config import plugmem_cfg
+from plugmem_config import plugmem_cfg, session_status
 
 # === 配置（通过环境变量覆盖） ===
 MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
@@ -97,10 +97,18 @@ def _ledger_has(ref, sha):
 def _already_in_l2(entry):
     """这条缓冲条目是否已经写进过 L2（防止重放重复写入）。
 
-    有 provenance 的走账本（cheap、确定）；没有的退回文本比对。
+    优先级（可靠性从高到低）：
+      1. session_id 回查 GET /sessions/{sid} → count>=1 —— **确定**
+      2. 账本命中 (ref+sha+l2_status=ok) —— 只能说明「曾声明成功」
+      3. 文本比对（search）—— **尽力而为，不可靠**
     返回 (是否已存在, 依据说明)。
     """
     ref, sha = entry.get("source_line"), entry.get("sha")
+    if ref and sha:
+        cnt, _err = session_status(f"l1:{ref}#{sha}")
+        if cnt is not None and cnt >= 1:
+            return True, "session 回查命中"
+    # 账本只记「声明成功」，遇到「报失败但已生效」会漏判，故仅作次选
     if _ledger_has(ref, sha):
         return True, "账本命中"
     text = (entry.get("text") or "").strip()
@@ -210,6 +218,16 @@ def flush_buffer(buffer_path=None):
         try:
             if _http_write_memory(text, entry.get("tags") if isinstance(entry, dict) else None,
                                   entry.get("source_line"), entry.get("sha")):
+                # P3：写完回查确认；只在确认落地时才移出缓冲区
+                ref, sha = entry.get("source_line"), entry.get("sha")
+                if ref and sha:
+                    cnt, _err = session_status(f"l1:{ref}#{sha}")
+                    if cnt == 0:
+                        fail += 1
+                        kept.append(entry)
+                        print(f"  ⚠️ [{entry.get('timestamp','?')[:19]}] 接口 200 但回查未落地，留待重试",
+                              file=sys.stderr)
+                        continue
                 success += 1
             else:
                 fail += 1

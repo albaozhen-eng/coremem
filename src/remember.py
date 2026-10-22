@@ -39,11 +39,11 @@ import urllib.error
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from plugmem_config import plugmem_cfg
+from plugmem_config import plugmem_cfg, session_status
 
 # === 配置（通过环境变量覆盖） ===
-MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
-MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", MEMORY_HOME / "memory"))
+MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".openclaw"))
+MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", Path.home() / ".openclaw" / "workspace-main" / "memory"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 BUFFER_FILE = DATA_DIR / "memory_buffer.jsonl"
 UNIFIED_FACTS_FILE = MEMORY_DIR / "unified-facts.jsonl"
@@ -298,6 +298,7 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
         "unified_facts": False,
         "source_line": None,
         "sha": None,
+        "l2_status": None,
     }
     
     # ① daily log（必成，失败即报错）—— P1：同时拿到 (ref, line, sha)
@@ -309,19 +310,42 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
     results["source_line"] = loc["ref"]
     results["sha"] = loc["sha"]
     
-    # ② 语义索引（尽力，失败→buffer）—— P1：provenance 随行
-    results["semantic_index"] = write_to_semantic_index(
+    # ② 语义索引 + P3 回查
+    #   关键顺序：**先回查、再决定是否入 buffer**。
+    #   反过来写（先 buffer 再撤销）会在磁盘上留下条目 —— 第一版就是这么错的，
+    #   测试用例 B1 抓到：内存标志翻转了，但 buffer 文件里仍有该条目，重试照样重复写入。
+    attempted = write_to_semantic_index(
         content, tags, event_time, event_time_precision, confidence,
         source_line=loc["ref"], sha=loc["sha"])
-    if not results["semantic_index"]:
+    sid = f"l1:{loc['ref']}#{loc['sha']}"
+    cnt, perr = session_status(sid)
+
+    if cnt is not None and cnt >= 1:
+        # 已确认落地（不管接口当初报什么）—— 唯一不写 buffer 的成功态
+        l2_status = "ok"
+        results["semantic_index"] = True
+    elif cnt == 0:
+        # 确认没落地
+        l2_status = "lost" if attempted else "failed"
+        results["semantic_index"] = False
         results["buffer"] = fallback_to_buffer(content, tags,
                                                source_line=loc["ref"], sha=loc["sha"])
+        if attempted:
+            print("[remember] ⚠️ 接口报成功但回查未落地（session count=0），已转 buffer 重试",
+                  file=sys.stderr)
+    else:
+        # 回查本身不确定：报错时不入 buffer（入则可能重复），但如实标注待事后追查
+        l2_status = "ok_unverified" if attempted else "failed_unverified"
+        results["semantic_index"] = bool(attempted)
+        if not attempted:
+            results["buffer"] = fallback_to_buffer(content, tags,
+                                                   source_line=loc["ref"], sha=loc["sha"])
+        else:
+            print(f"[remember] ℹ️ 回查失败（{perr}），记为 ok_unverified，待 dup_guard 追查",
+                  file=sys.stderr)
 
-    # P1：账本（无论 L2 成败都记，便于区分「没写」与「写了但没进去」）
-    append_ledger(loc["ref"], loc["sha"],
-                  "ok" if results["semantic_index"] else ("buffered" if results["buffer"] else "failed"),
-                  l2_session_id=f"l1:{loc['ref']}#{loc['sha']}" if source_line_ok(results) else "",
-                  content=content)
+    results["l2_status"] = l2_status
+    append_ledger(loc["ref"], loc["sha"], l2_status, l2_session_id=sid, content=content)
     
     # ③ unified-facts
     results["unified_facts"] = append_unified_facts(content, tags)
