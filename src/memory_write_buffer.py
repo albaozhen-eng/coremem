@@ -94,6 +94,24 @@ def _ledger_has(ref, sha):
     return False
 
 
+def _ledger_missing(entry) -> None:
+    """把「终态缺失」写进账本，供 memory_health 的 dup_guard 探针告警。"""
+    ref, sha = entry.get("source_line"), entry.get("sha")
+    if not (ref and sha):
+        return
+    try:
+        with open(LEDGER, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "ref": ref, "sha": sha, "l2_status": "missing",
+                "l2_session_id": f"l1:{ref}#{sha}",
+                "text_head": (entry.get("text") or "")[:80],
+                "note": "buffer-flush: 200 但回查未落地，停止重试",
+            }, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def _already_in_l2(entry):
     """这条缓冲条目是否已经写进过 L2（防止重放重复写入）。
 
@@ -223,10 +241,13 @@ def flush_buffer(buffer_path=None):
                 if ref and sha:
                     cnt, _err = session_status(f"l1:{ref}#{sha}")
                     if cnt == 0:
+                        # 终态缺失：接口 200 但节点不存在。重试极可能无效（若因去重则永远无效），
+                        # 无限重试会让 buffer 永不排空 —— 所以不进 buffer，
+                        # 改为落一条账本，让 dup_guard 探针把它报出来。
                         fail += 1
-                        kept.append(entry)
-                        print(f"  ⚠️ [{entry.get('timestamp','?')[:19]}] 接口 200 但回查未落地，留待重试",
-                              file=sys.stderr)
+                        _ledger_missing(entry)
+                        print(f"  ⚠️ [{entry.get('timestamp','?')[:19]}] 接口 200 但回查未落地 → "
+                              f"记为 missing 并告警，不再重试", file=sys.stderr)
                         continue
                 success += 1
             else:

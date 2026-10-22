@@ -34,6 +34,7 @@ import os
 import re
 import sys
 import unicodedata
+import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -131,8 +132,49 @@ def append_daily_log_ex(content: str, tags: list[str] = None) -> dict | None:
             "file": log_path.name, "sha": _line_sha(line_text), "text": line_text}
 
 
+def near_dup_candidates(text: str, limit: int = 8) -> int:
+    """诊断线索：估计 L2 里有多少条与本文本高度重叠的内容。
+
+    **这不是"被去重"的证明** —— PlugMem 的去重判据（同 tag 最近 5 个、cosine > 0.92）
+    在服务端内部，客户端拿不到相似度。这里只用词面重叠做粗估，
+    目的是给人工判断提供线索，不得用于自动豁免告警。
+    """
+    try:
+        import re as _re
+        toks = _re.findall(r"[A-Za-z0-9_.\-]{4,}|[\u4e00-\u9fff]{3,}", text)
+        if not toks:
+            return 0
+        probes = [t for t in sorted(set(toks), key=len, reverse=True) if 3 <= len(t) <= 10][:2]
+        if not probes:
+            return 0
+        headers = {"X-API-Key": SEMANTIC_API_KEY} if SEMANTIC_API_KEY else {}
+        seen, hits = set(), 0
+        norm = lambda t: "".join((t or "").split()).lower()
+        target = norm(text)
+        for probe in probes:
+            url = (f"{SEMANTIC_BASE_URL}/api/v1/graphs/{SEMANTIC_GRAPH_ID}/search"
+                   f"?q={urllib.parse.quote(probe)}&limit=20")
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10) as r:
+                nodes = json.loads(r.read()).get("nodes", [])
+            for n in nodes:
+                nid = n.get("semantic_id")
+                if nid in seen:
+                    continue
+                seen.add(nid)
+                if norm(n.get("text")) == target:
+                    return -1        # 完全同文本已存在（最可能的解释）
+                # 词面重叠率粗估
+                a = set(_re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_.\-]{3,}", target))
+                b = set(_re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_.\-]{3,}", norm(n.get("text"))))
+                if a and b and len(a & b) / len(a) >= 0.8:
+                    hits += 1
+        return hits
+    except Exception:  # noqa: BLE001
+        return -1
+
+
 def append_ledger(ref: str, sha: str, l2_status: str, l2_session_id: str = "",
-                  content: str = "") -> bool:
+                  content: str = "", dup_candidates=None) -> bool:
     """P1：写一条写入账本（append-only，best-effort，不阻断主流程）。"""
     entry = {
         "ts": now_iso(),
@@ -142,6 +184,8 @@ def append_ledger(ref: str, sha: str, l2_status: str, l2_session_id: str = "",
         "l2_session_id": l2_session_id,  # 实际发给 PlugMem 的 session_id
         "text_head": (content or "")[:80],
     }
+    if dup_candidates is not None:
+        entry["dup_candidates"] = dup_candidates
     try:
         WRITE_LEDGER.parent.mkdir(parents=True, exist_ok=True)
         with open(WRITE_LEDGER, "a", encoding="utf-8") as f:
@@ -299,7 +343,7 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
         "source_line": None,
         "sha": None,
         "l2_status": None,
-        "dedup_skipped": False,
+        "dup_candidates": None,
     }
     
     # ① daily log（必成，失败即报错）—— P1：同时拿到 (ref, line, sha)
@@ -327,16 +371,22 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
         results["semantic_index"] = True
     elif cnt == 0:
         if attempted:
-            # P3 根因（已复现）：PlugMem 插入时会把「同 tag 下最近 5 个节点中相似度 > 0.92」
-            # 的记忆**直接丢弃**（memory_graph.py:613-640，P0-3 的有意设计），
-            # 但响应仍返回 200 且 stats.semantic=1。
-            # 这种条目重试永远无效（相似度不会变），进 buffer 会变成死循环。
-            # 故记 dedup_skipped：不 buffer，但如实记录，让信息损失可见。
-            l2_status = "dedup_skipped"
+            # 接口报成功但回查查不到。这是**必须让人看到**的状态。
+            #
+            # 曾把这里一律判成 dedup_skipped（"预期去重"）——**那是错的**：
+            # 复核指出客户端拿不出相似度证据（PlugMem 的 0.92 判定在服务端内部，
+            # /retrieve 只返回推理提示词、不给相似度），于是 2026-10-22.md:204 那类
+            # 真实静默丢失会被这个标签永久掩盖。现在默认判 missing，会告警。
+            #
+            # 仍然不入 buffer：重试对"确实被丢弃"的条目无效，会变成永久重试循环。
+            # 但会记录诊断线索（是否存在近似候选），供人判断到底是去重还是丢了。
+            l2_status = "missing"
             results["semantic_index"] = False
-            results["dedup_skipped"] = True
-            print("[remember] ⚠️ 被 PlugMem 去重丢弃（近似重复 >0.92）：内容未落库，"
-                  "但接口报成功。记为 dedup_skipped，不重试。", file=sys.stderr)
+            cand = near_dup_candidates(content)
+            results["dup_candidates"] = cand
+            print(f"[remember] ⚠️ 接口报成功但回查未落地（session count=0）。"
+                  f"近似候选 {cand} 个 —— 记为 missing 并告警，不入 buffer（避免永久重试）。",
+                  file=sys.stderr)
         else:
             l2_status = "failed"
             results["semantic_index"] = False
@@ -354,7 +404,8 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
                   file=sys.stderr)
 
     results["l2_status"] = l2_status
-    append_ledger(loc["ref"], loc["sha"], l2_status, l2_session_id=sid, content=content)
+    append_ledger(loc["ref"], loc["sha"], l2_status, l2_session_id=sid, content=content,
+                  dup_candidates=results.get("dup_candidates"))
     
     # ③ unified-facts
     results["unified_facts"] = append_unified_facts(content, tags)
