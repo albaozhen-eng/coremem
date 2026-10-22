@@ -29,8 +29,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import os
+import re
 import sys
+import unicodedata
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone, timedelta
@@ -51,6 +54,22 @@ SEMANTIC_API_KEY = _PC["api_key"]
 SEMANTIC_GRAPH_ID = _PC["graph_id"]
 
 PLUGMEM_TIMEOUT = 15  # seconds
+
+# P1：写入账本。每条成功写入 L1 的事实落一行，供 memory-ops 的 write_fidelity 探针核对。
+WRITE_LEDGER = DATA_DIR / "write_ledger.jsonl"
+
+
+def norm_line(text: str) -> str:
+    """NFKC 归一 + 折叠空白。
+
+    必须与 memory-ops 的 mo_common.norm() 保持一致，否则 sha 对不上。
+    """
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text or "")).strip()
+
+
+def _line_sha(text: str) -> str:
+    """L1 行指纹（16 位十六进制）。与 memory-ops 的 mo_common.line_sha() 同算法。"""
+    return hashlib.sha256(norm_line(text).encode("utf-8")).hexdigest()[:16]
 
 TZ = timezone(timedelta(hours=8))
 
@@ -76,27 +95,77 @@ def daily_log_path(date_str: str = None) -> Path:
 # 步骤 ①：同步写 daily log（SoT，必成）
 # ============================================================
 
-def append_daily_log(content: str, tags: list[str] = None) -> bool:
-    """追加内容到今日 daily log
-    
+def append_daily_log_ex(content: str, tags: list[str] = None) -> dict | None:
+    """追加到今日 daily log 并返回可回溯坐标。
+
     Returns:
-        True 成功，False 失败（磁盘故障）
+        {"ref": "2026-10-22.md:123", "line": 123, "sha": "<16hex>", "text": "<整行>"}
+        失败返回 None
     """
     ts = now_iso()
     log_path = daily_log_path()
-    
     tag_str = f" [{', '.join(tags)}]" if tags else ""
-    entry = f"\n- {ts}{tag_str} {content}\n"
-    
+    entry = f"\n- {ts}{tag_str} {content}\n"          # 与 append_daily_log 完全一致
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(entry)
-        print(f"[remember] ✅ daily log 已写入: {log_path}")
-        return True
     except Exception as e:
         print(f"[remember] ❌ daily log 写入失败（磁盘/权限问题）: {e}", file=sys.stderr)
+        return None
+
+    prefix = f"- {ts}{tag_str} "
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    line_no = None
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith(prefix):
+            line_no = i + 1
+            break
+    if line_no is None:
+        return None
+    line_text = lines[line_no - 1]
+    return {"ref": f"{log_path.name}:{line_no}", "line": line_no,
+            "file": log_path.name, "sha": _line_sha(line_text), "text": line_text}
+
+
+def append_ledger(ref: str, sha: str, l2_status: str, l2_session_id: str = "",
+                  content: str = "") -> bool:
+    """P1：写一条写入账本（append-only，best-effort，不阻断主流程）。"""
+    entry = {
+        "ts": now_iso(),
+        "ref": ref,
+        "sha": sha,
+        "l2_status": l2_status,          # ok / buffered / failed
+        "l2_session_id": l2_session_id,  # 实际发给 PlugMem 的 session_id
+        "text_head": (content or "")[:80],
+    }
+    try:
+        WRITE_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+        with open(WRITE_LEDGER, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return True
+    except Exception as e:  # noqa: BLE001
+        print(f"[remember] ⚠️ 账本写入失败: {e}", file=sys.stderr)
         return False
+
+
+def append_daily_log(content: str, tags: list[str] = None) -> bool:
+    """追加内容到今日 daily log（保留原 bool 契约）
+
+    Returns:
+        True 成功，False 失败（磁盘故障）
+    """
+    ok = append_daily_log_ex(content, tags) is not None
+    print(f"[remember] {'✅ daily log 已写入' if ok else '❌ daily log 写入失败'}: {daily_log_path()}")
+    return ok
+
+
+def source_line_ok(results: dict) -> bool:
+    """账本辅助：L1 已拿到坐标即视为可回溯。"""
+    return bool(results.get("source_line"))
 
 
 # ============================================================
@@ -105,7 +174,8 @@ def append_daily_log(content: str, tags: list[str] = None) -> bool:
 
 def write_to_semantic_index(content: str, tags: list[str] = None,
                             event_time: str = None, event_time_precision: str = None,
-                            confidence: float = 0.8) -> bool:
+                            confidence: float = 0.8,
+                            source_line: str = None, sha: str = None) -> bool:
     """直接 HTTP 调用语义索引后端 API（兼容 PlugMem 格式）
 
     API 格式：
@@ -128,7 +198,16 @@ def write_to_semantic_index(content: str, tags: list[str] = None,
     if event_time:
         sem["event_time"] = event_time
         sem["event_time_precision"] = event_time_precision or "day"
+    # P1：provenance 走 session_id。PlugMem 没有 metadata 字段，但 session_id 是
+    # 自由字符串且会盖在该次插入的所有节点上、并在 /search 里返回（实测可完整往返）。
+    # 格式：l1:<file>:<line>#<sha16>。tags 保持语义纯净，不塞 ref（否则每条记忆
+    # 会多出 2 个 tag 节点）。
+    session_id = None
+    if source_line:
+        session_id = f"l1:{source_line}" + (f"#{sha}" if sha else "")
     payload = {"mode": "structured", "semantic": [sem]}
+    if session_id:
+        payload["session_id"] = session_id
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if SEMANTIC_API_KEY:
@@ -151,7 +230,8 @@ def write_to_semantic_index(content: str, tags: list[str] = None,
         return False
 
 
-def fallback_to_buffer(content: str, tags: list[str] = None) -> bool:
+def fallback_to_buffer(content: str, tags: list[str] = None,
+                       source_line: str = None, sha: str = None) -> bool:
     """语义索引写入失败时降级到 buffer
     
     Returns:
@@ -163,6 +243,9 @@ def fallback_to_buffer(content: str, tags: list[str] = None) -> bool:
         "tags": tags or [],
         "source": "remember.py",
     }
+    if source_line:
+        entry["source_line"] = source_line
+        entry["sha"] = sha
     try:
         BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(BUFFER_FILE, "a", encoding="utf-8") as f:
@@ -213,19 +296,32 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
         "semantic_index": False,
         "buffer": False,
         "unified_facts": False,
+        "source_line": None,
+        "sha": None,
     }
     
-    # ① daily log（必成，失败即报错）
-    results["daily_log"] = append_daily_log(content, tags)
+    # ① daily log（必成，失败即报错）—— P1：同时拿到 (ref, line, sha)
+    loc = append_daily_log_ex(content, tags)
+    results["daily_log"] = loc is not None
     if not results["daily_log"]:
         print("[remember] ❌ SoT 写入失败，终止", file=sys.stderr)
         return results
+    results["source_line"] = loc["ref"]
+    results["sha"] = loc["sha"]
     
-    # ② 语义索引（尽力，失败→buffer）
+    # ② 语义索引（尽力，失败→buffer）—— P1：provenance 随行
     results["semantic_index"] = write_to_semantic_index(
-        content, tags, event_time, event_time_precision, confidence)
+        content, tags, event_time, event_time_precision, confidence,
+        source_line=loc["ref"], sha=loc["sha"])
     if not results["semantic_index"]:
-        results["buffer"] = fallback_to_buffer(content, tags)
+        results["buffer"] = fallback_to_buffer(content, tags,
+                                               source_line=loc["ref"], sha=loc["sha"])
+
+    # P1：账本（无论 L2 成败都记，便于区分「没写」与「写了但没进去」）
+    append_ledger(loc["ref"], loc["sha"],
+                  "ok" if results["semantic_index"] else ("buffered" if results["buffer"] else "failed"),
+                  l2_session_id=f"l1:{loc['ref']}#{loc['sha']}" if source_line_ok(results) else "",
+                  content=content)
     
     # ③ unified-facts
     results["unified_facts"] = append_unified_facts(content, tags)

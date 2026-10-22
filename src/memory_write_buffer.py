@@ -39,7 +39,7 @@ SEMANTIC_API_KEY = _PC["api_key"]
 SEMANTIC_GRAPH_ID = _PC["graph_id"]
 
 
-def _http_write_memory(text: str, tags=None) -> bool:
+def _http_write_memory(text: str, tags=None, source_line=None, sha=None) -> bool:
     """直连语义索引后端 API 写入"""
     url = f"{SEMANTIC_BASE_URL}/api/v1/graphs/{SEMANTIC_GRAPH_ID}/memories"
     # source 必须是 PlugMem 枚举值（failure_delta/correction/merged/repeated_lookup/explicit/business）
@@ -53,6 +53,9 @@ def _http_write_memory(text: str, tags=None) -> bool:
             "confidence": 0.7,
         }],
     }
+    # P1：重放时带上 provenance（与 remember.py 同一格式），否则降级重试会把来源丢掉
+    if source_line:
+        payload["session_id"] = f"l1:{source_line}" + (f"#{sha}" if sha else "")
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if SEMANTIC_API_KEY:
@@ -69,12 +72,15 @@ def _http_write_memory(text: str, tags=None) -> bool:
         return False
 
 
-def write_to_buffer(text, buffer_path=None):
-    """追加一条记忆到缓冲区"""
+def write_to_buffer(text, buffer_path=None, source_line=None, sha=None):
+    """追加一条记忆到缓冲区（P1：可带 provenance）"""
     if buffer_path is None:
         buffer_path = BUFFER_PATH
     buffer_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {"text": text, "timestamp": datetime.now().isoformat()}
+    if source_line:
+        entry["source_line"] = source_line
+        entry["sha"] = sha
     with open(buffer_path, "a") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
@@ -128,7 +134,8 @@ def flush_buffer(buffer_path=None):
         if not text:
             continue
         try:
-            if _http_write_memory(text, entry.get("tags") if isinstance(entry, dict) else None):
+            if _http_write_memory(text, entry.get("tags") if isinstance(entry, dict) else None,
+                                  entry.get("source_line"), entry.get("sha")):
                 success += 1
             else:
                 fail += 1
