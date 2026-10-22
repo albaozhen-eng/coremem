@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -70,6 +71,69 @@ def _http_write_memory(text: str, tags=None, source_line=None, sha=None) -> bool
     except Exception as e:
         print(f"  ↳ {type(e).__name__}: {e}", file=sys.stderr)
         return False
+
+
+LEDGER = DATA_DIR / "write_ledger.jsonl"
+
+
+def _ledger_has(ref, sha):
+    """P1 账本里是否已有 (ref, sha) 且 L2 写入成功 —— 用于幂等判定。"""
+    if not (ref and sha) or not LEDGER.exists():
+        return False
+    try:
+        with open(LEDGER) as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("ref") == ref and d.get("sha") == sha and d.get("l2_status") == "ok":
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _already_in_l2(entry):
+    """这条缓冲条目是否已经写进过 L2（防止重放重复写入）。
+
+    有 provenance 的走账本（cheap、确定）；没有的退回文本比对。
+    返回 (是否已存在, 依据说明)。
+    """
+    ref, sha = entry.get("source_line"), entry.get("sha")
+    if _ledger_has(ref, sha):
+        return True, "账本命中"
+    text = (entry.get("text") or "").strip()
+    if not text:
+        return False, ""
+    # 注意：这是**尽力而为**的兜底。PlugMem 的 search 是按关键词/向量匹配的，
+    # 单个探测词可能搜不到（实测：目标记忆就在 L2 里，但用其中一个短语搜却是 0 条）。
+    # 所以多试几个词、放大 limit，降低漏检 → 降低重复写入的概率。
+    # 有 provenance 的条目走账本（确定性），永远不会走到这里。
+    import re as _re
+    toks = _re.findall(r"[A-Za-z0-9_.\-]{4,}|[\u4e00-\u9fff]{2,}", text)
+    if not toks:
+        return False, ""
+    # 探测词要「短到能被 search 匹配」。曾经取最长 token（12~14 字的整句），
+    # PlugMem 的 search 不是子串匹配，于是搜不到 → 漏检 → 重复写入。
+    # 实测那条记忆确实在 L2 里，但用整句当查询是 0 条。
+    probes = [t for t in sorted(set(toks), key=len) if 3 <= len(t) <= 8][:4]
+    if not probes:
+        probes = sorted(set(toks), key=len)[:2]
+    norm = lambda t: "".join((t or "").split())
+    headers = {"X-API-Key": SEMANTIC_API_KEY} if SEMANTIC_API_KEY else {}
+    for probe in probes:
+        try:
+            url = (f"{SEMANTIC_BASE_URL}/api/v1/graphs/{SEMANTIC_GRAPH_ID}/search"
+                   f"?q={urllib.parse.quote(probe)}&limit=20")
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10) as r:
+                nodes = json.loads(r.read()).get("nodes", [])
+        except Exception:  # noqa: BLE001
+            continue
+        for n in nodes:
+            if norm(n.get("text")) == norm(text):
+                return True, "文本命中"
+    return False, ""
 
 
 def write_to_buffer(text, buffer_path=None, source_line=None, sha=None):
@@ -128,10 +192,20 @@ def flush_buffer(buffer_path=None):
         buffer_path.unlink(missing_ok=True)
         return True
 
-    success, fail = 0, 0
+    success, fail, skipped = 0, 0, 0
+    kept = []          # 只保留真正失败的条目
     for entry in entries:
         text = entry.get("text", "")
         if not text:
+            continue
+        # 幂等：已经写进过 L2 的条目直接算成功，不重复写
+        try:
+            dup, why = _already_in_l2(entry)
+        except Exception:  # noqa: BLE001
+            dup, why = False, ""
+        if dup:
+            skipped += 1
+            success += 1
             continue
         try:
             if _http_write_memory(text, entry.get("tags") if isinstance(entry, dict) else None,
@@ -139,14 +213,25 @@ def flush_buffer(buffer_path=None):
                 success += 1
             else:
                 fail += 1
+                kept.append(entry)
                 print(f"  ❌ [{entry.get('timestamp', '?')[:19]}] 语义索引写入失败", file=sys.stderr)
         except Exception as e:
             fail += 1
+            kept.append(entry)
             print(f"  ❌ [{entry.get('timestamp', '?')[:19]}] {e}", file=sys.stderr)
 
     print(f"✅ {success}/{len(entries)} 成功", end="")
-    if fail:
-        print(f"，{fail} 失败保留在缓冲区")
+    if skipped:
+        print(f"（其中 {skipped} 条幂等跳过）", end="")
+    # 关键修复：只把失败的写回缓冲区。
+    # 旧实现在 fail>0 时保留全部条目 —— 成功的那几条下次会被重复写入 L2。
+    if kept:
+        tmp = buffer_path.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            for e in kept:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        tmp.replace(buffer_path)
+        print(f"，{fail} 失败保留在缓冲区（成功的已移出）")
     else:
         print("，清空缓冲区")
         buffer_path.unlink(missing_ok=True)
