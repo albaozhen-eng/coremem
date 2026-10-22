@@ -372,6 +372,9 @@ def main():
     parser.add_argument("--tags", type=str, default="", help="逗号分隔的标签")
     parser.add_argument("--event-time", type=str, default="",
                         help="事实所指时间（ISO 日期，如 2024-03-15；缺省=今天）")
+    parser.add_argument("--event-time-precision", type=str, default="",
+                        dest="event_time_precision",
+                        help="事实时间精度：day / month / year（缺省按 day）")
     parser.add_argument("--confidence", type=float, default=0.8,
                         help="写入置信度（显式 0.8 / 自动 0.6 / 更新 0.5），默认 0.8")
     parser.add_argument("--dry-run", action="store_true", help="仅预览，不实际写入")
@@ -389,7 +392,8 @@ def main():
     
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
     event_time = args.event_time or None
-    event_time_precision = "day" if event_time else None
+    # P3：支持调用方指定精度（原先硬编码 day，月份级事实会被记成日级）
+    event_time_precision = (args.event_time_precision or "day") if event_time else None
     
     if args.dry_run:
         print(f"[remember] DRY RUN — 内容: {args.content}")
