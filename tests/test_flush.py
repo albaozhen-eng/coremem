@@ -81,12 +81,22 @@ with tempfile.TemporaryDirectory() as td:
 
 print("=== 3) 200 但回查未落地 → 不再放回 buffer（终止无限重试）===")
 with tempfile.TemporaryDirectory() as td:
-    tmp = Path(td); m = fresh(tmp); buf, _ = mk(tmp, 1)
+    tmp = Path(td); m = fresh(tmp)
+    # 复核指出：原用例的条目不带 source_line/sha，`if ref and sha` 不成立 →
+    # 走不到被测分支，等于空测。这里补上 provenance。
+    buf = tmp / "memory_buffer.jsonl"
+    buf.write_text(json.dumps({"timestamp": "2026-10-22T10:00:00+08:00", "text": "无限重试项",
+                               "source_line": "2026-10-22.md:9", "sha": "feedfacefeedface"},
+                              ensure_ascii=False) + "\n", encoding="utf-8")
     m.session_status = lambda sid, **k: (0, None)      # 回查永远查不到
+    m._already_in_l2 = lambda entry, **k: (False, "")  # 确保不被幂等短路
     m._http_write_memory = lambda *a, **k: True        # 接口永远 200
     for _ in range(3):
         m.flush_buffer(buf)
     check("三轮之后缓冲区仍未堆积", len(left(buf)) == 0, f"剩 {len(left(buf))} 条")
+    rows3 = [json.loads(l) for l in m.LEDGER.read_text().splitlines() if l.strip()] if m.LEDGER.exists() else []
+    check("留下了 missing 账本（而不是悄悄消失）",
+          any(r.get("l2_status") == "missing" for r in rows3), f"{len(rows3)} 行")
 
 print("=== 4) 终态缺失会落一条 missing 账本 ===")
 with tempfile.TemporaryDirectory() as td:

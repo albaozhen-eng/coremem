@@ -23,8 +23,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-SCRIPTS = Path.home() / ".openclaw/workspace/scripts"
+# 必须测**本仓库**的 remember.py。复核指出：指向部署目录时，
+# 仓库侧的回归永远测不出来 —— 那等于没测。
+_HERE = Path(__file__).resolve().parent
+SCRIPTS = _HERE.parent / "src"
 REMEMBER = SCRIPTS / "remember.py"
+assert REMEMBER.exists(), f"必须测仓库代码，找不到 {REMEMBER}"
 sys.path.insert(0, str(SCRIPTS))
 
 FAILS = []
