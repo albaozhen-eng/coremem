@@ -102,7 +102,7 @@ def _ledger_missing(entry) -> None:
     try:
         with open(LEDGER, "a", encoding="utf-8") as f:
             f.write(json.dumps({
-                "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "ts": datetime.now().astimezone().isoformat(timespec="seconds"),   # 带时区，与 remember.py 一致
                 "ref": ref, "sha": sha, "l2_status": "missing",
                 "l2_session_id": f"l1:{ref}#{sha}",
                 "text_head": (entry.get("text") or "")[:80],

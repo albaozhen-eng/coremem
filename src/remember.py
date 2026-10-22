@@ -162,7 +162,7 @@ def near_dup_candidates(text: str, limit: int = 8) -> int:
                     continue
                 seen.add(nid)
                 if norm(n.get("text")) == target:
-                    return -1        # 完全同文本已存在（最可能的解释）
+                    return -1        # 完全同文本已存在（与"异常"区分开）
                 # 词面重叠率粗估
                 a = set(_re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_.\-]{3,}", target))
                 b = set(_re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9_.\-]{3,}", norm(n.get("text"))))
@@ -170,7 +170,8 @@ def near_dup_candidates(text: str, limit: int = 8) -> int:
                     hits += 1
         return hits
     except Exception:  # noqa: BLE001
-        return -1
+        return None          # 查询失败 → 不提供线索（此前与"完全同文本"共用 -1，
+                             # 等于把"我查不到"说成"最可能是重复"，正是要避免的那种"替异常找理由"）
 
 
 def append_ledger(ref: str, sha: str, l2_status: str, l2_session_id: str = "",

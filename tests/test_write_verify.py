@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""写入状态机测试（P3 + 复核修正版）。
+
+复核指出的问题：初版把「接口 200 但回查查不到」一律判成 dedup_skipped（预期去重），
+客户端其实拿不出相似度证据 —— 那会把真实静默丢失一并掩盖。
+现在该状态为 `missing`，会告警、不重试。
+
+覆盖 6 种组合：
+  ok                  回查 count≥1                       → 不 buffer
+  missing             200 且 count=0                     → 不 buffer（重试无效），带诊断线索
+  failed              接口失败且 count=0                 → buffer 重试
+  ok(B1)              接口失败但 count≥1（已生效）        → 不 buffer
+  ok_unverified       200 但回查失败（不知道）            → 不 buffer
+  failed_unverified   接口失败且回查失败                  → buffer
+
+运行：python3 test_write_verify.py
+"""
+import importlib.util
+import json
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+SCRIPTS = Path.home() / ".openclaw/workspace/scripts"
+REMEMBER = SCRIPTS / "remember.py"
+sys.path.insert(0, str(SCRIPTS))
+
+FAILS = []
+
+
+def check(name, cond, detail=""):
+    print(f"  [{'PASS' if cond else 'FAIL'}] {name}" + (f"  {detail}" if detail else ""))
+    if not cond:
+        FAILS.append(name)
+
+
+def run_case(tag, http_ok, session_count):
+    home = Path(tempfile.mkdtemp(prefix=f"wv-{tag}-"))
+    os.environ.update(MEMORY_HOME=str(home), MEM_DAILY_NOTES_DIR=str(home / "memory"),
+                      MEM_DATA_DIR=str(home / "data"),
+                      MEM_SEMANTIC_GRAPH_ID="unused-in-test")
+    sys.modules.pop("plugmem_config", None)
+    spec = importlib.util.spec_from_file_location(f"rem_{tag}", REMEMBER)
+    R = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(R)
+    R.write_to_semantic_index = lambda *a, **k: http_ok
+    R.session_status = lambda sid, **k: (session_count, None if session_count is not None else "boom")
+    R.near_dup_candidates = lambda text, **k: 3        # 固定诊断线索，便于断言
+    res = R.remember(f"故障注入用例 {tag}", ["t"])
+    led = home / "data" / "write_ledger.jsonl"
+    row = json.loads(led.read_text().splitlines()[-1]) if led.exists() else {}
+    buf = home / "data" / "memory_buffer.jsonl"
+    n_buf = len([l for l in buf.read_text().splitlines() if l.strip()]) if buf.exists() else 0
+    shutil.rmtree(home, ignore_errors=True)
+    return row, n_buf, res
+
+
+print("=== 1) 接口 200，回查 count=0 → missing（可告警），不 buffer ===")
+row, nb, res = run_case("missing", True, 0)
+check("l2_status == 'missing'", row.get("l2_status") == "missing", f"实际 {row.get('l2_status')}")
+check("不 buffer（重试无效）", nb == 0, f"buffer {nb} 条")
+check("账本带诊断线索 dup_candidates", row.get("dup_candidates") is not None,
+      f"dup_candidates={row.get('dup_candidates')}")
+
+print("=== 2) 接口失败且回查 count=0 → failed，进 buffer ===")
+row, nb, _ = run_case("failed", False, 0)
+check("l2_status == 'failed'", row.get("l2_status") == "failed", f"实际 {row.get('l2_status')}")
+check("进入 buffer 重试", nb == 1, f"buffer {nb} 条")
+
+print("=== 3) 接口失败但回查 count≥1（B1：其实已生效）→ ok，不 buffer ===")
+row, nb, _ = run_case("b1", False, 1)
+check("l2_status == 'ok'", row.get("l2_status") == "ok", f"实际 {row.get('l2_status')}")
+check("不 buffer（避免重试重复写入）", nb == 0, f"buffer {nb} 条")
+
+print("=== 4) 正常：接口 200 且 count≥1 → ok ===")
+row, nb, _ = run_case("ok", True, 1)
+check("l2_status == 'ok'", row.get("l2_status") == "ok", f"实际 {row.get('l2_status')}")
+check("不 buffer", nb == 0, f"buffer {nb} 条")
+
+print("=== 5) 接口 200 但回查失败（不知道）→ ok_unverified，不 buffer ===")
+row, nb, _ = run_case("ou", True, None)
+check("l2_status == 'ok_unverified'", row.get("l2_status") == "ok_unverified",
+      f"实际 {row.get('l2_status')}")
+check("不 buffer（不确定时保守，避免重复）", nb == 0, f"buffer {nb} 条")
+
+print("=== 6) 接口失败且回查失败 → failed_unverified，进 buffer ===")
+row, nb, _ = run_case("fu", False, None)
+check("l2_status == 'failed_unverified'", row.get("l2_status") == "failed_unverified",
+      f"实际 {row.get('l2_status')}")
+check("进入 buffer", nb == 1, f"buffer {nb} 条")
+
+print()
+print("全部通过" if not FAILS else f"失败 {len(FAILS)}: {FAILS}")
+sys.exit(1 if FAILS else 0)
