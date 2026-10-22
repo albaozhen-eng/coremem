@@ -58,6 +58,7 @@ with tempfile.TemporaryDirectory() as td:
         sent.append(text)
         return text != "条目3"          # 第 4 条失败
     m._http_write_memory = w
+    m._already_in_l2 = lambda entry, **k: (False, "")   # 封闭：不请求 PlugMem
     m.flush_buffer(buf)
     rest = left(buf)
     check("只剩失败的那 1 条", len(rest) == 1 and rest[0]["text"] == "条目3",
@@ -107,13 +108,20 @@ with tempfile.TemporaryDirectory() as td:
                               ensure_ascii=False) + "\n", encoding="utf-8")
     m.session_status = lambda sid, **k: (0, None)
     m._http_write_memory = lambda *a, **k: True
+    m._already_in_l2 = lambda entry, **k: (False, "")   # 封闭：不请求 PlugMem
     m.flush_buffer(buf)
     rows = [json.loads(l) for l in m.LEDGER.read_text().splitlines() if l.strip()] if m.LEDGER.exists() else []
     check("账本里有 missing 行", any(r.get("l2_status") == "missing" for r in rows), f"{rows}")
     ts = rows[-1].get("ts", "") if rows else ""
-    check("账本时间戳带时区（否则探针做时间相减会崩）",
-          ts.endswith("+08:00") or (len(ts) >= 6 and (ts[-6] in "+-" or ts[-5] in "+-")),
-          f"ts={ts!r}")
+    # 复核指出：原先用字符串特征判断，纯日期 "2026-10-23" 或 "+0800" 都会误判通过。
+    # 改为真正解析并检查 tzinfo。
+    from datetime import datetime as _dt
+    try:
+        _parsed = _dt.fromisoformat(ts)
+        _has_tz = _parsed.tzinfo is not None
+    except ValueError:
+        _has_tz = False
+    check("账本时间戳带时区（否则探针做时间相减会崩）", _has_tz, f"ts={ts!r}")
 
 print()
 print("全部通过" if not FAILS else f"失败 {len(FAILS)}: {FAILS}")
