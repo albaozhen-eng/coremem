@@ -299,6 +299,7 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
         "source_line": None,
         "sha": None,
         "l2_status": None,
+        "dedup_skipped": False,
     }
     
     # ① daily log（必成，失败即报错）—— P1：同时拿到 (ref, line, sha)
@@ -325,14 +326,22 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
         l2_status = "ok"
         results["semantic_index"] = True
     elif cnt == 0:
-        # 确认没落地
-        l2_status = "lost" if attempted else "failed"
-        results["semantic_index"] = False
-        results["buffer"] = fallback_to_buffer(content, tags,
-                                               source_line=loc["ref"], sha=loc["sha"])
         if attempted:
-            print("[remember] ⚠️ 接口报成功但回查未落地（session count=0），已转 buffer 重试",
-                  file=sys.stderr)
+            # P3 根因（已复现）：PlugMem 插入时会把「同 tag 下最近 5 个节点中相似度 > 0.92」
+            # 的记忆**直接丢弃**（memory_graph.py:613-640，P0-3 的有意设计），
+            # 但响应仍返回 200 且 stats.semantic=1。
+            # 这种条目重试永远无效（相似度不会变），进 buffer 会变成死循环。
+            # 故记 dedup_skipped：不 buffer，但如实记录，让信息损失可见。
+            l2_status = "dedup_skipped"
+            results["semantic_index"] = False
+            results["dedup_skipped"] = True
+            print("[remember] ⚠️ 被 PlugMem 去重丢弃（近似重复 >0.92）：内容未落库，"
+                  "但接口报成功。记为 dedup_skipped，不重试。", file=sys.stderr)
+        else:
+            l2_status = "failed"
+            results["semantic_index"] = False
+            results["buffer"] = fallback_to_buffer(content, tags,
+                                                   source_line=loc["ref"], sha=loc["sha"])
     else:
         # 回查本身不确定：报错时不入 buffer（入则可能重复），但如实标注待事后追查
         l2_status = "ok_unverified" if attempted else "failed_unverified"
