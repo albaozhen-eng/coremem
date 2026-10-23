@@ -4,7 +4,7 @@
 复核指出：`test_write_verify` 完全没覆盖 flush，而 flush 恰是曾经无限重试的路径。
 这里测 4 件事：
   1. 部分失败时**只保留失败条目**（旧实现保留全部 → 成功的会被重复写入）
-  2. 已写进 L2 的条目被幂等跳过
+  2. 已写进 L2 的条目被幂等跳过（2b：session 回查不可用时靠账本兜底）
   3. 「接口 200 但回查未落地」→ 不再放回 buffer（终止无限重试）
   4. 终态缺失会落一条 `missing` 账本（供探针告警，而不是悄悄消失）
 
@@ -80,6 +80,36 @@ with tempfile.TemporaryDirectory() as td:
     check("未发出写入请求", calls == [], f"calls={calls}")
     check("缓冲区已清空", not buf.exists() or not buf.read_text().strip())
 
+print("=== 2b) session 回查不可用 → 靠账本兜底跳过 ===")
+# 复核第五轮指出：用例 2 把 session_status mock 成 (1,None)，在第一优先级就返回了，
+# 把 _ledger_has 改成恒 False 照样通过 —— 账本兜底分支根本没被测到。
+# 这里让 session 回查返回「未知」，并把文本兜底指向不可达地址（封闭、不请求 PlugMem），
+# 这样能让写入被跳过的只有账本这一条路径。
+def _case_2b(tmp, ledger_override=None):
+    m = fresh(tmp)
+    ref, sha = "2026-10-22.md:9", "abcdef0123456789"
+    m.LEDGER.write_text(json.dumps({"ts": "2026-10-22T10:00:00+08:00", "ref": ref, "sha": sha,
+                                    "l2_status": "ok"}) + "\n", encoding="utf-8")
+    buf = tmp / "memory_buffer.jsonl"
+    buf.write_text(json.dumps({"timestamp": "2026-10-22T10:00:01+08:00", "text": "账本兜底项",
+                               "source_line": ref, "sha": sha}, ensure_ascii=False) + "\n", encoding="utf-8")
+    calls = []
+    m._http_write_memory = lambda *a, **k: (calls.append(a[0]), True)[1]
+    m.session_status = lambda sid, **k: (None, "unreachable")   # 回查拿不到结论
+    m.SEMANTIC_BASE_URL = "http://127.0.0.1:9"                  # 文本兜底必然失败
+    if ledger_override is not None:
+        m._ledger_has = ledger_override
+    m.flush_buffer(buf)
+    return calls, buf
+
+with tempfile.TemporaryDirectory() as td:
+    calls, buf = _case_2b(Path(td))
+    check("账本命中 → 未发出写入请求", calls == [], f"calls={calls}")
+    check("缓冲区已清空", not buf.exists() or not buf.read_text().strip())
+with tempfile.TemporaryDirectory() as td:
+    # 对照：把账本判定关掉，同样的输入必须真的发出写入 —— 证明上面的通过来自账本分支
+    calls, _ = _case_2b(Path(td), ledger_override=lambda ref, sha: False)
+    check("对照：_ledger_has 恒 False 时会发出写入", calls == ["账本兜底项"], f"calls={calls}")
 print("=== 3) 200 但回查未落地 → 不再放回 buffer（终止无限重试）===")
 with tempfile.TemporaryDirectory() as td:
     tmp = Path(td); m = fresh(tmp)
