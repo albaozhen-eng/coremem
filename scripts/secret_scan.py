@@ -170,10 +170,11 @@ def main():
     if args.tracked:
         import subprocess
         out = subprocess.run(["git", "ls-files"], cwd=target, capture_output=True, text=True)
-        files = [Path(target) / f for f in out.stdout.splitlines()]
+        # git ls-files 输出相对 target 的路径：相对串用于排除判断，拼接后的 Path 用于读取
         all_hits = []
-        for fp in files:
-            if fp.is_file() and not should_exclude(fp.relative_to(Path(target).resolve() if Path(target).is_absolute() else Path(target).resolve())):
+        for rel in out.stdout.splitlines():
+            fp = Path(target) / rel
+            if fp.is_file() and not should_exclude(Path(rel)):
                 all_hits.extend(scan_file(fp))
         hits = all_hits
     else:

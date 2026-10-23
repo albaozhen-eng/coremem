@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# deploy.sh — 把 ~/coremem（GitHub 源）部署到生产 scripts 目录，带时间戳备份
+# deploy.sh — 把 ~/coremem（GitHub 源）部署到生产目录，带时间戳备份
+# 用法: bash deploy.sh [REPO] [DEST] [PROFILE]
+#   REPO    = coremem 仓库根（默认 ~/coremem）
+#   DEST    = 部署目标目录（默认 ~/.openclaw/workspace/scripts）
+#   PROFILE = 机器 profile 名（默认 openclaw-scripts；plugmem-suite-cli 用于独立 cli）
 set -euo pipefail
 REPO="${1:-$HOME/coremem}"
-DEST="$HOME/.openclaw/workspace/scripts"
-WS_MAIN="$HOME/.openclaw/workspace-main"
+DEST="${2:-$HOME/.openclaw/workspace/scripts}"
+PROFILE="${3:-openclaw-scripts}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 BAK="$DEST/.backup/coremem_predeploy_$STAMP"
 
 mkdir -p "$BAK"
-for f in plugmem_config.py remember.py memory_recall.py memory_write_buffer.py memory_insight_scan.py morning_briefing.py; do
+for f in plugmem_config.py remember.py memory_recall.py memory_write_buffer.py memory_insight_scan.py morning_briefing.py vault_export.py; do
   [ -f "$DEST/$f" ] && cp -p "$DEST/$f" "$BAK/" || true
 done
 echo "✓ 旧版已备份到 $BAK"
 
-python3 "$REPO/deploy/patch_deploy.py" "$REPO" "$DEST"
-chmod 600 "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py "$DEST"/secret_scan.py 2>/dev/null || true
+python3 "$REPO/deploy/patch_deploy.py" "$REPO" "$DEST" --profile "$PROFILE"
+chmod 600 "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py "$DEST"/vault_export.py "$DEST"/secret_scan.py 2>/dev/null || true
 echo "✓ 生产脚本已更新（默认值=现网路径，env 可覆盖）"
 
 # pre-commit hook → coremem 仓库自身（发布/同步前隐私闸门：拦 /Users/ 路径、真实域名、手机号、key）
@@ -30,6 +34,13 @@ HOOK
 fi
 
 # 语法自检
-for f in "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py; do
+for f in "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py "$DEST"/vault_export.py; do
   python3 -m py_compile "$f" && echo "✓ syntax ok: $(basename "$f")"
 done
+
+# 冒烟自检
+if [ -x "$DEST/remember.py" ] || [ -f "$DEST/remember.py" ]; then
+  echo "--- 冒烟自检 ---"
+  python3 "$DEST/remember.py" --status 2>&1 | head -5
+  python3 "$DEST/memory_write_buffer.py" --check 2>/dev/null && echo "✓ buffer --check 通过" || echo "⚠ buffer --check 非零"
+fi
