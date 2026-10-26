@@ -29,8 +29,9 @@ from pathlib import Path
 from plugmem_config import plugmem_cfg, session_status
 
 # === 配置（通过环境变量覆盖） ===
-MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
+MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".openclaw"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
+MAX_L2_RETRY = 3  # L2 回查未落地时的最大重试次数；超过才判 missing
 BUFFER_PATH = DATA_DIR / "memory_buffer.jsonl"
 CODE_MEM_PATH = DATA_DIR / "codex_memory_buffer.jsonl"
 
@@ -106,7 +107,7 @@ def _ledger_missing(entry) -> None:
                 "ref": ref, "sha": sha, "l2_status": "missing",
                 "l2_session_id": f"l1:{ref}#{sha}",
                 "text_head": (entry.get("text") or "")[:80],
-                "note": "buffer-flush: 200 但回查未落地，停止重试",
+                "note": "buffer-flush: 200 但回查未落地，已重试 %d 次后判终态" % int(entry.get("l2_retry", 0)),
             }, ensure_ascii=False) + "\n")
     except OSError:
         pass
@@ -241,13 +242,22 @@ def flush_buffer(buffer_path=None):
                 if ref and sha:
                     cnt, _err = session_status(f"l1:{ref}#{sha}")
                     if cnt == 0:
-                        # 终态缺失：接口 200 但节点不存在。重试极可能无效（若因去重则永远无效），
-                        # 无限重试会让 buffer 永不排空 —— 所以不进 buffer，
-                        # 改为落一条账本，让 dup_guard 探针把它报出来。
-                        fail += 1
-                        _ledger_missing(entry)
-                        print(f"  ⚠️ [{entry.get('timestamp','?')[:19]}] 接口 200 但回查未落地 → "
-                              f"记为 missing 并告警，不再重试", file=sys.stderr)
+                        # 接口 200 但回查无节点。原实现判定「终态缺失」直接丢弃，理由是
+                        # 「重试极可能无效」。该假设已被证伪：2026-10-25 对 4 条被判终态缺失的
+                        # 条目按同样参数重放，4/4 全部落地（cnt=1）。改为有界重试：
+                        # 前 MAX_L2_RETRY 次留在缓冲区等下一轮，超过才记 missing。
+                        n_try = int(entry.get("l2_retry", 0)) + 1
+                        entry["l2_retry"] = n_try
+                        if n_try < MAX_L2_RETRY:
+                            fail += 1
+                            kept.append(entry)
+                            print(f"  ↻ [{entry.get('timestamp','?')[:19]}] 接口 200 但未落地，"
+                                  f"第 {n_try}/{MAX_L2_RETRY} 次，留待重试", file=sys.stderr)
+                        else:
+                            fail += 1
+                            _ledger_missing(entry)
+                            print(f"  ⚠️ [{entry.get('timestamp','?')[:19]}] 重试 {n_try} 次仍未落地"
+                                  f" → 记为 missing 并告警", file=sys.stderr)
                         continue
                 success += 1
             else:

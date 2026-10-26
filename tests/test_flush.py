@@ -129,7 +129,7 @@ with tempfile.TemporaryDirectory() as td:
     check("留下了 missing 账本（而不是悄悄消失）",
           any(r.get("l2_status") == "missing" for r in rows3), f"{len(rows3)} 行")
 
-print("=== 4) 终态缺失会落一条 missing 账本 ===")
+print("=== 4) 终态缺失会落一条 missing 账本（有界重试之后）===")
 with tempfile.TemporaryDirectory() as td:
     tmp = Path(td); m = fresh(tmp)
     buf = tmp / "memory_buffer.jsonl"
@@ -139,8 +139,17 @@ with tempfile.TemporaryDirectory() as td:
     m.session_status = lambda sid, **k: (0, None)
     m._http_write_memory = lambda *a, **k: True
     m._already_in_l2 = lambda entry, **k: (False, "")   # 封闭：不请求 PlugMem
-    m.flush_buffer(buf)
+    # 2026-10-26：改为有界重试 —— 首次 flush 只留缓冲区，跑满 MAX_L2_RETRY 次才判 missing。
+    # 旧用例假设"一次即丢"，前提已被实测推翻（重放可恢复），故改为循环 flush。
+    rounds = 0
+    for _ in range(getattr(m, "MAX_L2_RETRY", 3) + 1):
+        rounds += 1
+        m.flush_buffer(buf)
+        rows_now = [json.loads(l) for l in m.LEDGER.read_text().splitlines() if l.strip()] if m.LEDGER.exists() else []
+        if any(r.get("l2_status") == "missing" for r in rows_now):
+            break
     rows = [json.loads(l) for l in m.LEDGER.read_text().splitlines() if l.strip()] if m.LEDGER.exists() else []
+    check("不是一次就判 missing（有界重试生效）", rounds > 1, f"实际 flush {rounds} 次")
     check("账本里有 missing 行", any(r.get("l2_status") == "missing" for r in rows), f"{rows}")
     ts = rows[-1].get("ts", "") if rows else ""
     # 复核指出：原先用字符串特征判断，纯日期 "2026-10-23" 或 "+0800" 都会误判通过。

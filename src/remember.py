@@ -33,6 +33,7 @@ import hashlib
 import os
 import re
 import sys
+import time
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -43,9 +44,11 @@ from pathlib import Path
 from plugmem_config import plugmem_cfg, session_status
 
 # === 配置（通过环境变量覆盖） ===
-MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
-MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", MEMORY_HOME / "memory"))
+MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".openclaw"))
+MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", Path.home() / ".openclaw" / "workspace-main" / "memory"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
+L2_INLINE_RETRY = 2      # 首写回查为 0 时的内联重试次数（之后转 buffer）
+L2_INLINE_BACKOFF = 0.5  # 秒，线性递增
 BUFFER_FILE = DATA_DIR / "memory_buffer.jsonl"
 UNIFIED_FACTS_FILE = MEMORY_DIR / "unified-facts.jsonl"
 
@@ -379,15 +382,32 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
             # /retrieve 只返回推理提示词、不给相似度），于是 2026-10-22.md:204 那类
             # 真实静默丢失会被这个标签永久掩盖。现在默认判 missing，会告警。
             #
-            # 仍然不入 buffer：重试对"确实被丢弃"的条目无效，会变成永久重试循环。
-            # 但会记录诊断线索（是否存在近似候选），供人判断到底是去重还是丢了。
-            l2_status = "missing"
-            results["semantic_index"] = False
-            cand = near_dup_candidates(content)
-            results["dup_candidates"] = cand
-            print(f"[remember] ⚠️ 接口报成功但回查未落地（session count=0）。"
-                  f"近似候选 {cand} 个 —— 记为 missing 并告警，不入 buffer（避免永久重试）。",
-                  file=sys.stderr)
+            # 2026-10-26 修正：原理由「重试对确实被丢弃的条目无效，会变成永久重试循环」
+            # 已被两次实测推翻：10-25 四条被判 missing 的重放 4/4 落地；
+            # 10-26 六条同批失败（压测把服务端打满）重放 6/6 落地。
+            # 所以 missing 多数是**瞬时失败**，不是去重。改为内联有界重试；
+            # 仍不成功才转 buffer（标 failed，由 buffer 的 MAX_L2_RETRY 兜底），
+            # 只有 buffer 也放弃时才由它写 missing —— 那时才算终态。
+            for _i in range(L2_INLINE_RETRY):
+                time.sleep(L2_INLINE_BACKOFF * (_i + 1))
+                write_to_semantic_index(
+                    content, tags, event_time, event_time_precision, confidence,
+                    source_line=loc["ref"], sha=loc["sha"])
+                _c, _ = session_status(sid)
+                if _c is not None and _c >= 1:
+                    cnt = _c
+                    break
+            if cnt is not None and cnt >= 1:
+                l2_status = "ok"
+                results["semantic_index"] = True
+                print("[remember] 重试后落地（首写回查为 0）", file=sys.stderr)
+            else:
+                l2_status = "failed"
+                results["semantic_index"] = False
+                results["dup_candidates"] = near_dup_candidates(content)
+                results["buffer"] = fallback_to_buffer(
+                    content, tags, source_line=loc["ref"], sha=loc["sha"])
+                print("[remember] 重试 %d 次仍未落地，转缓冲区继续重试（近似候选 %s 个）" % (L2_INLINE_RETRY, results["dup_candidates"]), file=sys.stderr)
         else:
             l2_status = "failed"
             results["semantic_index"] = False

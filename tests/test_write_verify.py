@@ -50,7 +50,17 @@ def run_case(tag, http_ok, session_count):
     R = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(R)
     R.write_to_semantic_index = lambda *a, **k: http_ok
-    R.session_status = lambda sid, **k: (session_count, None if session_count is not None else "boom")
+    # session_count 可以是固定值，也可以是序列（模拟"首查 0、重试后落地"）
+    if isinstance(session_count, (list, tuple)):
+        _seq = list(session_count)
+        _state = {"i": 0}
+        def _st(sid, **k):
+            i = min(_state["i"], len(_seq) - 1); _state["i"] += 1
+            v = _seq[i]
+            return (v, None if v is not None else "boom")
+        R.session_status = _st
+    else:
+        R.session_status = lambda sid, **k: (session_count, None if session_count is not None else "boom")
     R.near_dup_candidates = lambda text, **k: 3        # 固定诊断线索，便于断言
     res = R.remember(f"故障注入用例 {tag}", ["t"])
     led = home / "data" / "write_ledger.jsonl"
@@ -61,12 +71,18 @@ def run_case(tag, http_ok, session_count):
     return row, n_buf, res
 
 
-print("=== 1) 接口 200，回查 count=0 → missing（可告警），不 buffer ===")
+print("=== 1) 接口 200，回查 count 恒为 0 → 有界重试后仍不落地 → failed + buffer ===")
 row, nb, res = run_case("missing", True, 0)
-check("l2_status == 'missing'", row.get("l2_status") == "missing", f"实际 {row.get('l2_status')}")
-check("不 buffer（重试无效）", nb == 0, f"buffer {nb} 条")
+check("l2_status == 'failed'（不再一次即判 missing）", row.get("l2_status") == "failed",
+      f"实际 {row.get('l2_status')}")
+check("进入 buffer 继续重试", nb == 1, f"buffer {nb} 条")
 check("账本带诊断线索 dup_candidates", row.get("dup_candidates") is not None,
       f"dup_candidates={row.get('dup_candidates')}")
+
+print("=== 1b) 接口 200，首查 0 但重试后 count=1 → ok，不 buffer ===")
+row, nb, _ = run_case("retry_ok", True, [0, 1])
+check("l2_status == 'ok'", row.get("l2_status") == "ok", f"实际 {row.get('l2_status')}")
+check("不 buffer（已经落地）", nb == 0, f"buffer {nb} 条")
 
 print("=== 2) 接口失败且回查 count=0 → failed，进 buffer ===")
 row, nb, _ = run_case("failed", False, 0)
