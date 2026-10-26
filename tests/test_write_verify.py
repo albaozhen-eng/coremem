@@ -49,7 +49,11 @@ def run_case(tag, http_ok, session_count):
     spec = importlib.util.spec_from_file_location(f"rem_{tag}", REMEMBER)
     R = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(R)
-    R.write_to_semantic_index = lambda *a, **k: http_ok
+    calls = {"post": 0}
+    def _post(*a, **k):
+        calls["post"] += 1
+        return http_ok
+    R.write_to_semantic_index = _post
     # session_count 可以是固定值，也可以是序列（模拟"首查 0、重试后落地"）
     if isinstance(session_count, (list, tuple)):
         _seq = list(session_count)
@@ -68,11 +72,11 @@ def run_case(tag, http_ok, session_count):
     buf = home / "data" / "memory_buffer.jsonl"
     n_buf = len([l for l in buf.read_text().splitlines() if l.strip()]) if buf.exists() else 0
     shutil.rmtree(home, ignore_errors=True)
-    return row, n_buf, res
+    return row, n_buf, res, calls
 
 
 print("=== 1) 接口 200，回查 count 恒为 0 → 有界重试后仍不落地 → failed + buffer ===")
-row, nb, res = run_case("missing", True, 0)
+row, nb, res, calls = run_case("missing", True, 0)
 check("l2_status == 'failed'（不再一次即判 missing）", row.get("l2_status") == "failed",
       f"实际 {row.get('l2_status')}")
 check("进入 buffer 继续重试", nb == 1, f"buffer {nb} 条")
@@ -80,36 +84,48 @@ check("账本带诊断线索 dup_candidates", row.get("dup_candidates") is not N
       f"dup_candidates={row.get('dup_candidates')}")
 
 print("=== 1b) 接口 200，首查 0 但重试后 count=1 → ok，不 buffer ===")
-row, nb, _ = run_case("retry_ok", True, [0, 1])
+row, nb, _, calls = run_case("retry_ok", True, [0, 1])
 check("l2_status == 'ok'", row.get("l2_status") == "ok", f"实际 {row.get('l2_status')}")
 check("不 buffer（已经落地）", nb == 0, f"buffer {nb} 条")
 
 print("=== 2) 接口失败且回查 count=0 → failed，进 buffer ===")
-row, nb, _ = run_case("failed", False, 0)
+row, nb, _, calls = run_case("failed", False, 0)
 check("l2_status == 'failed'", row.get("l2_status") == "failed", f"实际 {row.get('l2_status')}")
 check("进入 buffer 重试", nb == 1, f"buffer {nb} 条")
 
 print("=== 3) 接口失败但回查 count≥1（B1：其实已生效）→ ok，不 buffer ===")
-row, nb, _ = run_case("b1", False, 1)
+row, nb, _, calls = run_case("b1", False, 1)
 check("l2_status == 'ok'", row.get("l2_status") == "ok", f"实际 {row.get('l2_status')}")
 check("不 buffer（避免重试重复写入）", nb == 0, f"buffer {nb} 条")
 
 print("=== 4) 正常：接口 200 且 count≥1 → ok ===")
-row, nb, _ = run_case("ok", True, 1)
+row, nb, _, calls = run_case("ok", True, 1)
 check("l2_status == 'ok'", row.get("l2_status") == "ok", f"实际 {row.get('l2_status')}")
 check("不 buffer", nb == 0, f"buffer {nb} 条")
 
 print("=== 5) 接口 200 但回查失败（不知道）→ ok_unverified，不 buffer ===")
-row, nb, _ = run_case("ou", True, None)
+row, nb, _, calls = run_case("ou", True, None)
 check("l2_status == 'ok_unverified'", row.get("l2_status") == "ok_unverified",
       f"实际 {row.get('l2_status')}")
 check("不 buffer（不确定时保守，避免重复）", nb == 0, f"buffer {nb} 条")
 
 print("=== 6) 接口失败且回查失败 → failed_unverified，进 buffer ===")
-row, nb, _ = run_case("fu", False, None)
+row, nb, _, calls = run_case("fu", False, None)
 check("l2_status == 'failed_unverified'", row.get("l2_status") == "failed_unverified",
       f"实际 {row.get('l2_status')}")
 check("进入 buffer", nb == 1, f"buffer {nb} 条")
+
+print("=== 7) 回查报错（状态未知）不得重复写，也不入 buffer ===")
+row, nb, _, calls = run_case("unknown", True, None)
+check("未知态标 ok_unverified（与主路径一致）",
+      row.get("l2_status") == "ok_unverified", f"实际 {row.get('l2_status')}")
+check("未知态不转 buffer（转了可能重复写）", nb == 0, f"buffer {nb} 条")
+check("未知态只 POST 一次", calls["post"] == 1, f"实际 {calls['post']} 次")
+
+print("=== 8) 重试有次数上限，且每次重发前先回查 ===")
+row, nb, _, calls = run_case("retry_cap", True, 0)
+check("POST 次数不超过 1 + 重试上限", calls["post"] <= 1 + 2, f"实际 {calls['post']} 次")
+check("仍然失败才转 buffer", nb == 1, f"buffer {nb} 条")
 
 print()
 print("全部通过" if not FAILS else f"失败 {len(FAILS)}: {FAILS}")

@@ -49,6 +49,7 @@ MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", Path.home() / ".openclaw
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 L2_INLINE_RETRY = 2      # 首写回查为 0 时的内联重试次数（之后转 buffer）
 L2_INLINE_BACKOFF = 0.5  # 秒，线性递增
+L2_INLINE_BUDGET = 5.0   # 内联重试总耗时上限（秒），服务端过载时不再加压
 BUFFER_FILE = DATA_DIR / "memory_buffer.jsonl"
 UNIFIED_FACTS_FILE = MEMORY_DIR / "unified-facts.jsonl"
 
@@ -388,26 +389,52 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
             # 所以 missing 多数是**瞬时失败**，不是去重。改为内联有界重试；
             # 仍不成功才转 buffer（标 failed，由 buffer 的 MAX_L2_RETRY 兜底），
             # 只有 buffer 也放弃时才由它写 missing —— 那时才算终态。
-            for _i in range(L2_INLINE_RETRY):
-                time.sleep(L2_INLINE_BACKOFF * (_i + 1))
+            _i_attempt = 0
+            # 复核（2026-10-26）指出三处，一并修正：
+            #   ① 原来「先 sleep → POST → 回查」，重发前不确认是否已落地 → 可能重复写；
+            #   ② 重试中回查报错被当失败转 buffer，而主路径同情形是 ok_unverified、不入 buffer；
+            #   ③ 无总耗时上限，服务端过载时会再压 30s+。
+            _deadline = time.time() + L2_INLINE_BUDGET
+            _unknown = False
+            while _i_attempt < L2_INLINE_RETRY and time.time() < _deadline:
+                _i_attempt += 1
+                time.sleep(L2_INLINE_BACKOFF * _i_attempt)
+                # 先回查：上一次 POST 可能已生效，只是刚才没查到
+                _pre, _perr = session_status(sid)
+                if _pre is not None and _pre >= 1:
+                    cnt = _pre
+                    break
+                if _pre is None:
+                    _unknown = True          # 状态未知：不重复写
+                    break
                 write_to_semantic_index(
                     content, tags, event_time, event_time_precision, confidence,
                     source_line=loc["ref"], sha=loc["sha"])
-                _c, _ = session_status(sid)
+                _c, _perr = session_status(sid)
                 if _c is not None and _c >= 1:
                     cnt = _c
+                    break
+                if _c is None:
+                    _unknown = True
                     break
             if cnt is not None and cnt >= 1:
                 l2_status = "ok"
                 results["semantic_index"] = True
                 print("[remember] 重试后落地（首写回查为 0）", file=sys.stderr)
+            elif _unknown:
+                # 与主路径一致：状态未知时保守标注，不转 buffer（转了可能重复写）
+                l2_status = "ok_unverified" if attempted else "failed_unverified"
+                results["semantic_index"] = bool(attempted)
+                print("[remember] 重试中回查失败，记为 %s，交由 dup_guard 追查" % l2_status,
+                  file=sys.stderr)
             else:
                 l2_status = "failed"
                 results["semantic_index"] = False
                 results["dup_candidates"] = near_dup_candidates(content)
                 results["buffer"] = fallback_to_buffer(
-                    content, tags, source_line=loc["ref"], sha=loc["sha"])
-                print("[remember] 重试 %d 次仍未落地，转缓冲区继续重试（近似候选 %s 个）" % (L2_INLINE_RETRY, results["dup_candidates"]), file=sys.stderr)
+                content, tags, source_line=loc["ref"], sha=loc["sha"])
+                print("[remember] 重试 %d 次仍未落地，转缓冲区继续重试（近似候选 %s 个）"
+                  % (L2_INLINE_RETRY, results["dup_candidates"]), file=sys.stderr)
         else:
             l2_status = "failed"
             results["semantic_index"] = False
