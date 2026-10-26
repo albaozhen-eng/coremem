@@ -29,7 +29,7 @@ from pathlib import Path
 from plugmem_config import plugmem_cfg, session_status
 
 # === 配置（通过环境变量覆盖） ===
-MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".openclaw"))
+MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 MAX_L2_RETRY = 3  # L2 回查未落地时的最大重试次数；超过才判 missing
 BUFFER_PATH = DATA_DIR / "memory_buffer.jsonl"

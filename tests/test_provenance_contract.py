@@ -133,6 +133,22 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # ---- 部署差异护栏：仓库默认必须是 ~/.coremem ----
+    # 背景：2026-10-22（2e66156）特意把从线上带过来的默认值改回仓库约定；
+    # 2026-10-26 又因为「整份拷贝活体文件回仓库」重犯了一次。
+    # 这里用断言把它钉住，避免第三次。
+    import re as _re
+    for _f, _pat in (
+        (HERE.parent / "src" / "remember.py", r'MEMORY_HOME = Path\(os\.environ\.get\("MEMORY_HOME", Path\.home\(\) / "([^"]+)"\)\)'),
+        (HERE.parent / "src" / "memory_write_buffer.py", r'MEMORY_HOME = Path\(os\.environ\.get\("MEMORY_HOME", Path\.home\(\) / "([^"]+)"\)\)'),
+    ):
+        if not _f.exists():
+            continue
+        _m = _re.search(_pat, _f.read_text(encoding="utf-8"))
+        if _m:
+            check(f"仓库默认路径是 ~/.coremem（{_f.name}）", _m.group(1) == ".coremem",
+                  f"实际 .{_m.group(1)}")
+
     print()
     if FAILS:
         print(f"契约测试失败 {len(FAILS)} 项: {FAILS}")
