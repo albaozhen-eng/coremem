@@ -49,6 +49,7 @@ MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", Path.home() / ".openclaw
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 L2_INLINE_RETRY = 2      # 首写回查为 0 时的内联重试次数（之后转 buffer）
 L2_INLINE_BACKOFF = 0.5  # 秒，线性递增
+L2_SETTLE_DELAY = 0.4   # 回查为 0 时的二次确认等待（秒），防最终一致性导致重复写
 L2_INLINE_BUDGET = 5.0   # 内联重试总耗时上限（秒），服务端过载时不再加压
 BUFFER_FILE = DATA_DIR / "memory_buffer.jsonl"
 UNIFIED_FACTS_FILE = MEMORY_DIR / "unified-facts.jsonl"
@@ -406,6 +407,16 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
                     break
                 if _pre is None:
                     _unknown = True          # 状态未知：不重复写
+                    break
+                # 二次确认：插件端可能最终一致 —— 刚写的节点要过一会儿才可见。
+                # 复核（2026-10-26）指出：只查一次就重发，会在「首次其实成功但还没可见」时写出两条。
+                time.sleep(L2_SETTLE_DELAY)
+                _settle, _ = session_status(sid)
+                if _settle is not None and _settle >= 1:
+                    cnt = _settle
+                    break
+                if _settle is None:
+                    _unknown = True
                     break
                 write_to_semantic_index(
                     content, tags, event_time, event_time_precision, confidence,

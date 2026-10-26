@@ -122,6 +122,13 @@ check("未知态标 ok_unverified（与主路径一致）",
 check("未知态不转 buffer（转了可能重复写）", nb == 0, f"buffer {nb} 条")
 check("未知态只 POST 一次", calls["post"] == 1, f"实际 {calls['post']} 次")
 
+print("=== 7b) 首次其实已生效、只是还没可见 → 不得重复写 ===")
+# 序列：[初次回查 0] [重试前回查 0] [二次确认时 1] → 只应有 1 次 POST
+row, nb, _, calls = run_case("settle", True, [0, 0, 1])
+check("二次确认发现已落地 → 标 ok", row.get("l2_status") == "ok", f"实际 {row.get('l2_status')}")
+check("不得重复写（POST 仍为 1 次）", calls["post"] == 1, f"实际 {calls['post']} 次")
+check("不转 buffer", nb == 0, f"buffer {nb} 条")
+
 print("=== 8) 重试有次数上限，且每次重发前先回查 ===")
 row, nb, _, calls = run_case("retry_cap", True, 0)
 check("POST 次数不超过 1 + 重试上限", calls["post"] <= 1 + 2, f"实际 {calls['post']} 次")
