@@ -17,6 +17,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("repo_root", type=Path)
 parser.add_argument("dest_dir", type=Path)
 parser.add_argument("--profile", default=None)
+parser.add_argument("--no-patch", action="store_true", help="部署仓库原样默认值（~/.coremem），不套用 .openclaw 生产补丁")
 args = parser.parse_args()
 
 repo, dest = args.repo_root.resolve(), args.dest_dir.resolve()
@@ -49,7 +50,7 @@ PATCHES = [
      'REPORTS_DIR = Path.home() / ".openclaw" / "workspace-main" / "memory" / "reports"'),
 ]
 
-FILES = ["plugmem_config.py", "remember.py", "memory_recall.py", "memory_write_buffer.py",
+FILES = ["plugmem_config.py", "remember.py", "memory_recall.py", "memory_write_buffer.py", "mo_common.py",
          "memory_insight_scan.py", "morning_briefing.py", "vault_export.py"]
 
 dest.mkdir(parents=True, exist_ok=True)
@@ -61,9 +62,10 @@ for name in FILES:
         continue
     text = src.read_text(encoding="utf-8")
     n = 0
-    for pat, rep in PATCHES:
-        text, k = re.subn(pat, rep, text)
-        n += k
+    if not args.no_patch:
+        for pat, rep in PATCHES:
+            text, k = re.subn(pat, rep, text)
+            n += k
     m = 0
     for old, new in profile_replacements.items():
         text, k = re.subn(re.escape(old), new, text)

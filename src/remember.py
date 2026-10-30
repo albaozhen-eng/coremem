@@ -45,7 +45,7 @@ from plugmem_config import plugmem_cfg, session_status
 
 # === 配置（通过环境变量覆盖） ===
 MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
-MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", Path.home() / ".openclaw" / "workspace-main" / "memory"))
+MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", MEMORY_HOME / "memory"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 L2_INLINE_RETRY = 2      # 首写回查为 0 时的内联重试次数（之后转 buffer）
 L2_INLINE_BACKOFF = 0.5  # 秒，线性递增

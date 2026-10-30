@@ -1,15 +1,15 @@
 #!/bin/bash
-# 把仓库脚本同步到活体，并强制套用部署差异（默认路径 ~/.openclaw）。
+# 把仓库脚本同步到活体（默认 ~/.coremem/scripts）。仓库默认值就是现网值，不再套用 .openclaw 补丁。
 #
-# 为什么需要它：直接 cp 会把仓库约定的 ~/.coremem 带到线上（或反过来把线上值带回仓库）。
-# 2026-10-22 和 2026-10-26 各犯过一次。这里把差异显式化。
+# 2026-10-30：coremem 与 OpenClaw 解耦，活体目录改为 ~/.coremem/scripts；
+# 旧版会把 ".coremem" sed 成 ".openclaw"，那是宿主耦合，已删除。
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")" && pwd)/src"
-LIVE="$HOME/.openclaw/workspace/scripts"
+LIVE="$HOME/.coremem/scripts"
 for f in remember.py memory_write_buffer.py; do
-    sed 's|Path.home() / ".coremem"|Path.home() / ".openclaw"|g' "$REPO/$f" > "$LIVE/$f"
+    cp "$REPO/$f" "$LIVE/$f"
     chmod +x "$LIVE/$f"
-    echo "  deployed $f → 默认 ~/.openclaw"
+    echo "  deployed $f → 默认 ~/.coremem"
 done
 python3 - "$LIVE" <<'PY'
 import sys, pathlib

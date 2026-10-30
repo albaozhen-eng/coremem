@@ -2,12 +2,12 @@
 # deploy.sh — 把 ~/coremem（GitHub 源）部署到生产目录，带时间戳备份
 # 用法: bash deploy.sh [REPO] [DEST] [PROFILE]
 #   REPO    = coremem 仓库根（默认 ~/coremem）
-#   DEST    = 部署目标目录（默认 ~/.openclaw/workspace/scripts）
-#   PROFILE = 机器 profile 名（默认 openclaw-scripts；plugmem-suite-cli 用于独立 cli）
+#   DEST    = 部署目标目录（默认 ~/.coremem/scripts；coremem 自持，不依宿主平台）
+#   PROFILE = 机器 profile 名（默认 coremem-local；plugmem-suite-cli 用于独立 cli）
 set -euo pipefail
 REPO="${1:-$HOME/coremem}"
-DEST="${2:-$HOME/.openclaw/workspace/scripts}"
-PROFILE="${3:-openclaw-scripts}"
+DEST="${2:-$HOME/.coremem/scripts}"
+PROFILE="${3:-coremem-local}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 BAK="$DEST/.backup/coremem_predeploy_$STAMP"
 
@@ -17,7 +17,9 @@ for f in plugmem_config.py remember.py memory_recall.py memory_write_buffer.py m
 done
 echo "✓ 旧版已备份到 $BAK"
 
-python3 "$REPO/deploy/patch_deploy.py" "$REPO" "$DEST" --profile "$PROFILE"
+PATCH_FLAG=""
+[ "$PROFILE" = "coremem-local" ] && PATCH_FLAG="--no-patch"
+python3 "$REPO/deploy/patch_deploy.py" "$REPO" "$DEST" --profile "$PROFILE" $PATCH_FLAG
 chmod 600 "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py "$DEST"/vault_export.py "$DEST"/secret_scan.py 2>/dev/null || true
 echo "✓ 生产脚本已更新（默认值=现网路径，env 可覆盖）"
 

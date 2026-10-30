@@ -17,7 +17,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+from contextlib import contextmanager
 import os
 import sys
 import urllib.parse
@@ -163,6 +165,23 @@ def _already_in_l2(entry):
     return False, ""
 
 
+@contextmanager
+def _buffer_lock(buffer_path):
+    """跨进程排他锁：flush 与 remember 的追加不会互相覆盖。
+
+    2026-10-30：旧实现先读全量、再 replace/unlink 回写，全程无锁；
+    flush 期间新追加的条目会被这次回写抹掉（丢记忆）。
+    """
+    lock_path = buffer_path.with_name(buffer_path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def write_to_buffer(text, buffer_path=None, source_line=None, sha=None):
     """追加一条记忆到缓冲区（P1：可带 provenance）"""
     if buffer_path is None:
@@ -172,8 +191,9 @@ def write_to_buffer(text, buffer_path=None, source_line=None, sha=None):
     if source_line:
         entry["source_line"] = source_line
         entry["sha"] = sha
-    with open(buffer_path, "a") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    with _buffer_lock(buffer_path):
+        with open(buffer_path, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def list_buffer(buffer_path=None):
@@ -208,12 +228,16 @@ def flush_buffer(buffer_path=None):
         return True
 
     entries = []
-    with open(buffer_path) as f:
-        for line in f:
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    # 读+清空在同一把锁内完成：此后新追加的条目落进空文件，不会被本轮回写覆盖。
+    with _buffer_lock(buffer_path):
+        with open(buffer_path) as f:
+            for line in f:
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        if entries:
+            buffer_path.unlink(missing_ok=True)
 
     if not entries:
         buffer_path.unlink(missing_ok=True)
@@ -275,15 +299,14 @@ def flush_buffer(buffer_path=None):
     # 关键修复：只把失败的写回缓冲区。
     # 旧实现在 fail>0 时保留全部条目 —— 成功的那几条下次会被重复写入 L2。
     if kept:
-        tmp = buffer_path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            for e in kept:
-                f.write(json.dumps(e, ensure_ascii=False) + "\n")
-        tmp.replace(buffer_path)
+        # 追加而非覆盖：flush 期间新写入的条目已在文件里，不能被这次回写抹掉。
+        with _buffer_lock(buffer_path):
+            with open(buffer_path, "a", encoding="utf-8") as f:
+                for e in kept:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
         print(f"，{fail} 失败保留在缓冲区（成功的已移出）")
     else:
         print("，清空缓冲区")
-        buffer_path.unlink(missing_ok=True)
 
     return fail == 0
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """plugmem_config.py — 语义索引后端配置统一解析。
-优先级：环境变量 MEM_* > ~/.openclaw/openclaw.json 的 plugins.entries.plugmem.config > 内置默认。
-任何机器把 PlugMem 配进 OpenClaw 后，coremem 脚本零配置即可工作。
+优先级：环境变量 MEM_* > ~/.coremem/plugmem/config.json > 内置默认。
+coremem 不依赖任何宿主平台；配置文件缺失时用内置默认（:8089），
+但 graph_id 缺失或配置损坏必须报错——静默落回 "default" 会把记忆写进错误的图。
 """
 from __future__ import annotations
 
@@ -18,15 +19,23 @@ _DEFAULTS = {
 
 def plugmem_cfg():
     file_cfg = {}
-    try:
-        d = json.loads((Path.home() / ".openclaw" / "openclaw.json").read_text(encoding="utf-8"))
-        file_cfg = (d.get("plugins", {}).get("entries", {}).get("plugmem", {}) or {}).get("config", {}) or {}
-    except Exception:
-        pass
+    cfg_path = Path.home() / ".coremem" / "plugmem" / "config.json"
+    if cfg_path.exists():
+        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError(f"{cfg_path} must contain a JSON object")
+        file_cfg = raw
+    graph = (
+        os.environ.get("MEM_SEMANTIC_GRAPH_ID", "").strip()
+        or file_cfg.get("defaultGraphId")
+        or (_DEFAULTS["graph_id"] if _DEFAULTS["graph_id"] != "default" else "")
+    )
+    if not graph:
+        raise RuntimeError("plugmem graph id is not configured (~/.coremem/plugmem/config.json defaultGraphId)")
     return {
         "base_url": os.environ.get("MEM_SEMANTIC_BASE_URL", "").strip() or file_cfg.get("baseUrl") or _DEFAULTS["base_url"],
         "api_key": os.environ.get("MEM_SEMANTIC_API_KEY", "").strip() or file_cfg.get("apiKey") or _DEFAULTS["api_key"],
-        "graph_id": os.environ.get("MEM_SEMANTIC_GRAPH_ID", "").strip() or file_cfg.get("defaultGraphId") or _DEFAULTS["graph_id"],
+        "graph_id": graph,
     }
 
 
