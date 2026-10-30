@@ -901,10 +901,75 @@ def print_results(results: list[dict], max_out: int = 15):
 # 命令实现
 # ============================================================
 
+_PUNCT_RE = re.compile(r"[\s，。、；：！？,.;:!?\"'“”‘’（）()【】\[\]、/\\|·…—-]+")
+
+
+def _norm_text(text: str) -> str:
+    return _PUNCT_RE.sub("", (text or "").lower())
+
+
+def collapse_near_duplicates(rows: list[dict], query: str, threshold: float = 0.75) -> list[dict]:
+    """把语义层里几乎同义的条目折叠成一条（2026-10-30）。
+
+    为什么：同一件事常被 capture/x 次重复写成 5–6 条变体（例如「坑位/名额 永久禁用」
+    有 6 条几乎同义的条目，全部 confidence=0.6），它们会挤满各层的前 3 个槽位，
+    把携带完整锚词的旧条目挤出 top-3，表现为 golden 退步，而数据其实没丢。
+
+    折叠规则：
+      * 归一化后（去标点/空白/大小写）文本相似度 >= threshold 的视为一组；
+      * 组内保留「命中查询词更多、其次文本更长」的那条；
+      * 被折叠条目的独特文本会拼进来（最多 3 条），避免折叠反而丢掉锚词。
+    只影响本次召回的展示，不改图里的数据。
+    """
+    import difflib
+
+    if len(rows) < 2:
+        return rows
+    q = (query or "").strip()
+    q_grams = [t for t in re.split(r"[\s,，。、；;:：]+", q) if t]
+
+    def coverage(text: str) -> int:
+        t = (text or "")
+        return sum(1 for token in q_grams if token and token in t)
+
+    normed = [_norm_text(r.get("content") or "") for r in rows]
+    used = [False] * len(rows)
+    out: list[dict] = []
+    for i in range(len(rows)):
+        if used[i]:
+            continue
+        group = [i]
+        used[i] = True
+        for j in range(i + 1, len(rows)):
+            if used[j]:
+                continue
+            if difflib.SequenceMatcher(None, normed[i], normed[j]).ratio() >= threshold:
+                group.append(j)
+                used[j] = True
+        if len(group) == 1:
+            out.append(rows[i])
+            continue
+        members = [rows[k] for k in group]
+        best = max(members, key=lambda m: (coverage(m.get("content") or ""), len(m.get("content") or "")))
+        merged = dict(best)
+        extra = []
+        for m in members:
+            text = (m.get("content") or "").strip()
+            if text and text not in (merged.get("content") or "") and len(extra) < 2:
+                extra.append(text)
+        if extra:
+            merged["content"] = ((merged.get("content") or "").rstrip() + " ｜ " + " ｜ ".join(extra))[:800]
+        merged["merged_from"] = len(group)
+        out.append(merged)
+    return out
+
+
 def do_search_all(keyword: str, hours: int, exclude: set) -> dict:
     kw = normalize_query(keyword)          # W3-3：子串层用改写后的检索词
     skills = search_skills(keyword, max_results=5)
-    pm = search_plugmem(keyword, max_results=5)
+    pm = search_plugmem(keyword, max_results=10)
+    # 先折叠近重复再截断：否则 5 个同义变体会把锚点挤出槽位（2026-10-30）
+    pm = collapse_near_duplicates(pm, keyword)[:5]
     pm, time_gate_applied = apply_time_gate(pm, keyword)
     sess = search_sessions(kw, hours=hours, max_results=10, exclude_sessions=exclude)
     logs = search_daily_logs(kw, max_results=5)

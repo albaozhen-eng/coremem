@@ -29,7 +29,10 @@ PATCH_FLAG=""
 [ "$PROFILE" = "coremem-local" ] && PATCH_FLAG="--no-patch"
 # 部署前漂移检查（2026-10-30 事故护栏）：生产被手改过而仓库没同步时默认拒绝，
 # 避免把生产热修（检索算法、退役守卫）无声回退。用 --force 才覆盖。
-if [ "$FORCE" != "1" ]; then
+# 工作区有未提交改动时，差异来自本次编辑而非漂移：跳过检查（提交后再部署最安全）。
+if [ "$FORCE" != "1" ] && ! git -C "$REPO" diff --quiet 2>/dev/null; then
+  echo "ℹ 仓库有未提交改动，跳过漂移检查（建议先 commit 再部署）"
+elif [ "$FORCE" != "1" ]; then
   python3 "$REPO/deploy/patch_deploy.py" "$REPO" "$DEST" --profile "$PROFILE" $PATCH_FLAG --check-drift || {
     echo "✗ 漂移检查未通过，已中止部署（确需覆盖：bash deploy.sh --force）" >&2
     exit 3

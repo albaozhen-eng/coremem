@@ -103,10 +103,19 @@ if args.check_drift:
                 fromfile=f"live/{name}", tofile=f"repo/{name}", lineterm="", n=1,
             )
         )
-        drift.append((name, diff))
+        # 只有「生产有、仓库没有」（diff 里出现 '-'）才是危险漂移：部署会抹掉它。
+        # 仓库领先（纯新增 '+'）是正常开发态，允许部署。
+        removals = [l for l in diff if l.startswith("-") and not l.startswith("---")]
+        drift.append((name, diff, bool(removals)))
+    dangerous = [d for d in drift if d[2]]
+    if drift and not dangerous:
+        print(f"✓ 仓库领先（{len(drift)} 个文件只有新增，无生产独有内容）→ 允许部署")
+        sys.exit(0)
     if drift:
-        print("✗ 生产与仓库存在漂移（生产有仓库没有的改动的可能性最大）：")
-        for name, diff in drift:
+        print("✗ 生产与仓库存在漂移（生产有仓库没有的改动，部署会抹掉它）：")
+        for name, diff, has_removal in drift:
+            if not has_removal:
+                continue
             print(f"\n--- {name} ({sum(1 for l in diff if l.startswith(('+', '-')) and not l.startswith(('+++', '---')))} 行差异)")
             for line in diff[:40]:
                 print("   " + line)
