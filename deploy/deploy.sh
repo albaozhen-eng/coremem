@@ -40,6 +40,15 @@ elif [ "$FORCE" != "1" ]; then
 fi
 
 python3 "$REPO/deploy/patch_deploy.py" "$REPO" "$DEST" --profile "$PROFILE" $PATCH_FLAG
+
+# 检索别名表：只在缺失时安装，绝不覆盖操作者维护过的版本。
+SEED="$REPO/deploy/seeds/search_aliases.json"
+TARGET="$(dirname "$DEST")/data/search_aliases.json"
+if [ -f "$SEED" ] && [ ! -f "$TARGET" ]; then
+  mkdir -p "$(dirname "$TARGET")"
+  cp "$SEED" "$TARGET"
+  echo "✓ 安装检索别名表 $TARGET"
+fi
 chmod 600 "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py "$DEST"/vault_export.py "$DEST"/secret_scan.py 2>/dev/null || true
 echo "✓ 生产脚本已更新（默认值=现网路径，env 可覆盖）"
 
