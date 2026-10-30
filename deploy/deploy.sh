@@ -5,9 +5,17 @@
 #   DEST    = 部署目标目录（默认 ~/.coremem/scripts；coremem 自持，不依宿主平台）
 #   PROFILE = 机器 profile 名（默认 coremem-local；plugmem-suite-cli 用于独立 cli）
 set -euo pipefail
-REPO="${1:-$HOME/coremem}"
-DEST="${2:-$HOME/.coremem/scripts}"
-PROFILE="${3:-coremem-local}"
+FORCE=0
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --force) FORCE=1 ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+REPO="${ARGS[0]:-$HOME/coremem}"
+DEST="${ARGS[1]:-$HOME/.coremem/scripts}"
+PROFILE="${ARGS[2]:-coremem-local}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 BAK="$DEST/.backup/coremem_predeploy_$STAMP"
 
@@ -19,6 +27,15 @@ echo "✓ 旧版已备份到 $BAK"
 
 PATCH_FLAG=""
 [ "$PROFILE" = "coremem-local" ] && PATCH_FLAG="--no-patch"
+# 部署前漂移检查（2026-10-30 事故护栏）：生产被手改过而仓库没同步时默认拒绝，
+# 避免把生产热修（检索算法、退役守卫）无声回退。用 --force 才覆盖。
+if [ "$FORCE" != "1" ]; then
+  python3 "$REPO/deploy/patch_deploy.py" "$REPO" "$DEST" --profile "$PROFILE" $PATCH_FLAG --check-drift || {
+    echo "✗ 漂移检查未通过，已中止部署（确需覆盖：bash deploy.sh --force）" >&2
+    exit 3
+  }
+fi
+
 python3 "$REPO/deploy/patch_deploy.py" "$REPO" "$DEST" --profile "$PROFILE" $PATCH_FLAG
 chmod 600 "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py "$DEST"/vault_export.py "$DEST"/secret_scan.py 2>/dev/null || true
 echo "✓ 生产脚本已更新（默认值=现网路径，env 可覆盖）"
