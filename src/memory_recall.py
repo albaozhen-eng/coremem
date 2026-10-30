@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -52,7 +53,7 @@ DEFAULT_HOURS = 48
 ESCALATE_HOURS = 720
 PER_FILE_CAP = 3
 MAX_RESULTS_DEFAULT = 15
-MAX_TOKENS = 3
+MAX_TOKENS = 12  # W3-5c：3 会把多词查询的 bigram 全截掉（#140 按此截断）
 TZ = timezone(timedelta(hours=8))
 
 # RRF 参数
@@ -69,6 +70,32 @@ STOPWORDS = set("""
 the a an how what why is are do does did was were be to of in on for with
 关于 一下 一个 一种 相关 问题 情况 事情 东西
 """.split())
+
+
+# --- W3-3：确定性查询改写（不调 LLM）---
+_QW = ["是多少", "多少", "是什么", "什么", "哪一个", "哪个", "哪台", "哪些", "哪里",
+       "为什么", "怎么", "如何", "是否", "有没有", "是不是", "能不能", "可不可以",
+       "请问", "帮我", "一下", "还记得", "告诉我", "描述"]
+_PUNCT = "？?！!。，,、；;:“”\"'（）()「」《》【】…—"
+
+
+def normalize_query(q: str) -> str:
+    """把整句问题压成检索词：去疑问词/标点/语气尾缀，保留名词与数字。
+    只用于 L1/L0/事实等子串检索层；语义层仍用原句。"""
+    s = q
+    # W3-7b：日期表达归一化（"9月21日" → "09-21"），L1 行内用的是 ISO 日期
+    def _date(mo):
+        mm, dd = int(mo.group(1)), int(mo.group(2))
+        return f" {mm:02d}-{dd:02d} "
+    s = re.sub(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]", _date, s)
+    s = re.sub(r"(\d{4})\s*年", r" \1 ", s)
+    for w in sorted(_QW, key=len, reverse=True):
+        s = s.replace(w, " ")
+    s = "".join(" " if ch in _PUNCT else ch for ch in s)
+    s = re.sub(r"(了吗|了呢|的吧|吗|呢|吧|啊)\s*$", " ", s)
+    parts = [p for p in s.split() if p and p.lower() not in STOPWORDS]
+    parts = [p for p in parts if len(p) >= 2 or p.isdigit() or re.search(r"[A-Za-z]", p)]
+    return " ".join(parts) if parts else q
 
 
 def load_aliases() -> dict:
@@ -106,8 +133,12 @@ def split_tokens(keyword: str) -> list[str]:
                 bg = t[i:i+2]
                 if bg not in STOPWORDS:
                     expanded.append(bg)
-        elif re.search(r"[\u4e00-\u9fff]", t) and re.search(r"[0-9]", t):
-            for seg in re.findall(r"[0-9]+|[\u4e00-\u9fff]+", t):
+        # 2026-10-26 修：原条件要求「中文 + 数字」，于是「中文 + 英文」
+        # （硬编码空间ID、boss-sender 修复）整条不展开，只剩整句一个 token，
+        # 整句几乎不可能在正文里逐字出现 → 该查询 facts 层直接为空。
+        # 改为：只要含中文且非纯中文，就按「ASCII 段 / 中文段」切开分别成 token。
+        elif re.search(r"[\u4e00-\u9fff]", t):
+            for seg in re.findall(r"[A-Za-z0-9_.-]+|[\u4e00-\u9fff]+", t):
                 if len(seg) >= 2 and seg not in STOPWORDS:
                     expanded.append(seg)
                 if re.fullmatch(r"[\u4e00-\u9fff]+", seg) and len(seg) >= 4:
@@ -202,7 +233,8 @@ def count_token_hits(content: str, tokens: list[str]) -> int:
     return sum(1 for t in tokens if t.lower() in cl)
 
 
-def snippet_around(content: str, tokens: list[str], window: int = 150) -> str:
+def snippet_and_pos(content: str, tokens: list[str], window: int = 150) -> tuple[str, int]:
+    """返回 (片段, 最佳匹配位置)；pos<0 表示未命中。"""
     cl = content.lower()
     best_pos = -1
     best_count = 0
@@ -214,12 +246,21 @@ def snippet_around(content: str, tokens: list[str], window: int = 150) -> str:
                 best_count = cnt
                 best_pos = idx
     if best_pos < 0:
-        return content[: window * 2]
+        return content[: window * 2], -1
     start = max(0, best_pos - window)
     end = min(len(content), best_pos + window * 2)
     prefix = "…" if start > 0 else ""
     suffix = "…" if end < len(content) else ""
-    return f"{prefix}{content[start:end]}{suffix}"
+    return f"{prefix}{content[start:end]}{suffix}", best_pos
+
+
+def snippet_around(content: str, tokens: list[str], window: int = 150) -> str:
+    return snippet_and_pos(content, tokens, window)[0]
+
+
+def line_of(content: str, pos: int) -> int:
+    """1-based 行号；pos<0 归 1。"""
+    return 1 if pos < 0 else content.count("\n", 0, pos) + 1
 
 
 def search_sessions(keyword: str, hours: int = DEFAULT_HOURS,
@@ -270,30 +311,115 @@ def search_sessions(keyword: str, hours: int = DEFAULT_HOURS,
 
 
 def search_daily_logs(keyword: str, max_results: int = 10) -> list[dict]:
+    """L1 检索（W3-5b：行级 + IDF）
+    L1 的事实是「一行一条」，所以按行建索引、按行打分：
+      score(line) = Σ log(1 + N/(1+df(t)))  —— 稀有词权重高
+    这样长文件不会因为"哪里都出现过"而霸榜，返回的也就是证据行本身。
+    """
     tokens = split_tokens(keyword)
-    results = []
-    if not MEMORY_DIR.exists():
-        return results
+    if not tokens or not MEMORY_DIR.exists():
+        return []
+
+    # W3-8a：别名扩展（记忆↔memory、待决↔待拍板…），只加词不改排序权重
+    _al = load_aliases()
+    _extra = []
+    for t in tokens:
+        for a in _al.get(t.lower(), []):
+            if a and a.lower() not in {x.lower() for x in tokens + _extra}:
+                _extra.append(a)
+    tokens = (tokens + _extra)[:16]
+
+    docs = []
     for f in sorted(MEMORY_DIR.glob("*.md"), reverse=True):
         if not DAILY_LOG_PATTERN.match(f.name):
             continue
         try:
-            content = f.read_text(encoding="utf-8")
+            docs.append((f, f.read_text(encoding="utf-8")))
         except Exception:
             continue
-        n = count_token_hits(content, tokens)
-        if n > 0:
-            results.append({
-                "file": f.stem,
-                "role": "log",
-                "content": snippet_around(content, tokens),
-                "ts": None,
-                "hits": n,
-            })
-            if len(results) >= max_results * 2:
-                break
-    results.sort(key=lambda r: -r.get("hits", 1))
-    return results[:max_results]
+    if not docs:
+        return []
+
+    N = len(docs)
+    lowered = [(f, c, c.lower()) for f, c in docs]
+    df = {t: 0 for t in tokens}
+    for _, _, cl in lowered:
+        for t in tokens:
+            if t.lower() in cl:
+                df[t] += 1
+    weights = {t: math.log(1 + N / (1 + df[t])) for t in tokens}
+
+    hits = []
+    for f, content, cl in lowered:
+        for i, (line, lcl) in enumerate(zip(content.splitlines(), cl.splitlines()), 1):
+            if not line.strip():
+                continue
+            present = [t for t in tokens if t.lower() in lcl]
+            if not present:
+                continue
+            score = sum(weights[t] for t in present) + 0.3 * (len(present) - 1)
+            hits.append((score, f.name, i, line))   # P1：存带扩展名的文件名，供 file 字段与回指使用
+    hits.sort(key=lambda x: -x[0])
+
+    out = []
+    for score, fname, lineno, line in hits[:max_results]:
+        text = line.strip()
+        if len(text) > 600:
+            text = text[:600] + "…"
+        out.append({
+            "file": f"{fname}:{lineno}",   # P1：带 .md 扩展名，与 golden 锚点格式一致
+            "role": "log",
+            "prov_class": "source",        # P2：L1 就是事实源本身
+            "content": text,
+            "ts": None,
+            "hits": round(score, 2),
+        })
+    return out
+
+
+_DERIVED_BEGIN = "<!-- DERIVED:BEGIN"
+_DERIVED_END = "<!-- DERIVED:END"
+
+
+def _md_units(content: str) -> list[tuple[int, str]]:
+    """把 MEMORY.md 切成**可独立检索的单元**，返回 [(起始行号, 文本)]。
+
+    为什么需要：原先整份 MEMORY.md 当一个文档打分、只取一个片段，
+    于是「问编制冲突，返回的片段里夹着未读积压的规则」——
+    规则粒度被文档粒度掩盖。现在 DERIVED 区里**每条规则单独成单元**，
+    MANUAL 等其余内容仍合并成一个单元（它们的价值在于整段上下文）。
+    """
+    lines = content.splitlines()
+    bi = next((i for i, l in enumerate(lines) if _DERIVED_BEGIN in l), None)
+    ei = next((i for i, l in enumerate(lines) if _DERIVED_END in l), None)
+    if bi is None or ei is None or ei <= bi:
+        return [(1, content)]                      # 没有派生区：行为与改动前一致
+
+    units: list[tuple[int, str]] = []
+    head = "\n".join(lines[:bi])
+    if head.strip():
+        units.append((1, head))
+
+    cur_start, cur_lines = None, []
+    for i in range(bi + 1, ei):
+        l = lines[i]
+        if l.strip().startswith("- **"):           # 一条规则的开始
+            if cur_start is not None:
+                units.append((cur_start, "\n".join(cur_lines)))
+            cur_start, cur_lines = i + 1, [l.strip()]
+        elif cur_start is not None and l.strip().startswith("- "):
+            cur_lines.append(l.strip())            # 规则下的证据行
+        elif cur_start is not None and not l.strip():
+            if cur_lines:
+                units.append((cur_start, "\n".join(cur_lines)))
+            cur_start, cur_lines = None, []
+    if cur_start is not None:
+        units.append((cur_start, "\n".join(cur_lines)))
+
+    tail = "\n".join(lines[ei + 1:])
+    if tail.strip():
+        units.append((ei + 2, tail))
+    return units or [(1, content)]
 
 
 def search_fact_files(keyword: str, max_results: int = 10) -> list[dict]:
@@ -310,56 +436,154 @@ def search_fact_files(keyword: str, max_results: int = 10) -> list[dict]:
             content = path.read_text(encoding="utf-8")
         except Exception:
             continue
-        n = count_token_hits(content, tokens)
-        if n > 0:
+        # MEMORY.md 按「规则」切开打分；unified-facts 保持整文件行为
+        units = _md_units(content) if label == "MEMORY.md" else [(1, content)]
+        for start_ln, text in units:
+            n = count_token_hits(text, tokens)
+            if n <= 0:
+                continue
+            snip, pos = snippet_and_pos(text, tokens, window=100)
             results.append({
-                "file": label,
+                "file": f"{label}:{start_ln + (line_of(text, pos) - 1)}",
                 "role": "fact",
-                "content": snippet_around(content, tokens, window=100),
+                "prov_class": "derived",
+                "content": snip,
                 "ts": None,
                 "hits": n,
+                # 复核指出：密度若用片段长度（≈302 字）当分母，短单元会被系统性抬高，
+                # 相当于给 DERIVED 区加 ~3 倍权重。改为用**单元自身长度**。
+                "_unit_len": len(text),
             })
-        if len(results) >= max_results * 2:
+        if len(results) >= max_results * 3:
             break
-    results.sort(key=lambda r: -r.get("hits", 1))
+    # 排序：主键是**查询词覆盖率**（命中了几个不同的查询词），次键才是命中密度。
+    #
+    # 演进过程（两次都被实测/复核否掉）：
+    #   ① 按命中总数：一段 302 字日志命中 4 次，压过 75 字规则命中 3 次；
+    #   ② 按密度（分母片段长度）：相当于给短单元加 ~3 倍权重，
+    #      于是"空间 续费"这种查询会把一条只沾到"空间"的无关规则顶到第 1；
+    #   ③ 密度改分母为单元长度：偏向又反了过来，大单元被过度惩罚。
+    # 真正该衡量的是"这个候选回答了多少个查询词"，即覆盖率；长度只做次键。
+    def _coverage(r):
+        txt = (r.get("content") or "")
+        return sum(1 for t in set(tokens) if t and t in txt)
+
+    def _density(r):
+        return r.get("hits", 1) * 100.0 / max(r.get("_unit_len") or len(r.get("content") or ""), 50)
+
+    results.sort(key=lambda r: (-_coverage(r), -_density(r), -r.get("hits", 1)))
+    for r in results:
+        r.pop("_unit_len", None)
     return results[:max_results]
 
 
+_PROV_IDX = [None]   # 进程级缓存：L1 前缀索引只建一次
+_EXCLUDE_SYNTH = (os.environ.get("MEM_EXCLUDE_SYNTH", "").strip().lower() in ("1", "true", "yes", "on"))
+
+
+def _parse_prov_session_id(session_id):
+    """P1：从 PlugMem 的 session_id 还原 (source_line, sha)。
+
+    写入侧格式：l1:<file>:<line>#<sha16>（见 remember.py）。
+    历史节点 session_id 为 null → 返回 (None, None)，行为与改动前一致。
+    """
+    if not session_id or not isinstance(session_id, str) or not session_id.startswith("l1:"):
+        return None, None
+    body = session_id[3:]
+    ref, _, sha = body.partition("#")
+    if ":" not in ref:
+        return None, None
+    return ref, (sha or None)
+
+
 def search_plugmem(keyword: str, max_results: int = 5) -> list[dict]:
-    tokens = split_tokens(keyword)
+    # 每个 token 一次 HTTP 往返，服务端串行处理：10 个 token ≈ 500ms。
+    # MEM_PM_TOKEN_MODE 用于 A/B：
+    #   all(默认) = 整句 + 全部二元组；query = 只发整句；query2 = 整句 + 2 个二元组
+    #
+    # 2026-10-25 实测：整句 + 9 个二元组 = 10 次往返 ≈ 570ms；
+    # 只发整句 = 1 次 ≈ 290ms，而 golden（33 题）与 KIS（300 题）的召回完全不变
+    # （KIS: 0 退步 / 0 进步，p=1）。因此默认改为只发整句。
+    # 保留 all，并通过 MEM_PM_TOKEN_MODE 可回退。
+    _mode = os.environ.get("MEM_PM_TOKEN_MODE", "query")
+    _all = split_tokens(keyword)
+    # 复核指出（2026-10-26）：原写 `_all[:1]`，而 `_all[0]` 是**按空格/标点切的第一段**，
+    # 不是整句 —— 40 题里 29 题发出去的是 `BOSS`、`SCNet`、`10-02` 这种片段。
+    # 现改为把归一化后的整句作为第一个查询（语义检索本就该吃整句）。
+    _full = (normalize_query(keyword) or keyword).strip()
+    _first = [_full] if _full else _all[:1]
+    if _mode == "all":
+        _toks = _all
+    elif _mode == "query2":
+        _toks = _first + _all[1:3]
+    else:                     # query / 默认
+        _toks = _first
+    tokens = _toks
+    # 兜底：整句检索 0 命中时，再补二元组（避免短查询/新词因整句嵌入差而空手而归）
+    _fallback = _all[1:4] if _mode in ("query", "query2") else []
     results = []
     seen_ids = set()
 
-    for tok in tokens[:MAX_TOKENS]:
-        url = f"{SEMANTIC_BASE_URL}/api/v1/graphs/{SEMANTIC_GRAPH_ID}/search?q={urllib.parse.quote(tok)}&limit={max_results}"
-        try:
-            req = urllib.request.Request(url, headers={"X-API-Key": SEMANTIC_API_KEY} if SEMANTIC_API_KEY else {})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read())
-            for n in data.get("nodes", []):
-                nid = n.get("semantic_id", n.get("id"))
-                text = n.get("text", "")
-                if n.get("is_active") is False:
-                    continue
-                conf = n.get("confidence")
-                if conf is not None and conf < get_min_confidence():
-                    continue
-                if nid in seen_ids or not text:
-                    continue
-                seen_ids.add(nid)
-                results.append({
-                    "file": f"semantic#{nid}",
-                    "role": "fact",
-                    "content": snippet_around(text, tokens, window=100),
-                    "ts": None,
-                    "layer": "facts",
-                    "node_id": nid,
-                    "confidence": conf,
-                    "event_time": n.get("event_time") or None,
-                    "created_at": n.get("created_at") or None,
-                })
-        except Exception:
-            continue
+    def _run(ts):
+        results = []
+        seen_ids = set()
+        for tok in ts[:MAX_TOKENS]:
+            url = f"{SEMANTIC_BASE_URL}/api/v1/graphs/{SEMANTIC_GRAPH_ID}/search?q={urllib.parse.quote(tok)}&limit={max_results}"
+            try:
+                req = urllib.request.Request(url, headers={"X-API-Key": SEMANTIC_API_KEY} if SEMANTIC_API_KEY else {})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read())
+                for n in data.get("nodes", []):
+                    nid = n.get("semantic_id", n.get("id"))
+                    text = n.get("text", "")
+                    if n.get("is_active") is False:
+                        continue
+                    conf = n.get("confidence")
+                    if conf is not None and conf < get_min_confidence():
+                        continue
+                    if nid in seen_ids or not text:
+                        continue
+                    seen_ids.add(nid)
+                    _src, _sha = _parse_prov_session_id(n.get("session_id"))
+                    # P2：标注这条 L2 记忆有没有事实源
+                    #   derived     = 文本能在 L1 找到（可核对）
+                    #   synthesized = 找不到（是生成/汇总内容，不可核对）
+                    # 大样本诊断显示 synthesized 中位长度是可回溯节点的 5 倍，
+                    # 是增值的合成层 —— 所以不删、不重建，只如实标注。
+                    try:
+                        from l1_prov_index import classify as _pv_classify, build as _pv_build
+                        if _PROV_IDX[0] is None:
+                            _PROV_IDX[0] = _pv_build()
+                        _prov_class = _pv_classify(text, _PROV_IDX[0])
+                    except Exception:  # noqa: BLE001
+                        _prov_class = "unknown"
+                    # 门控实验：剔除「无事实源」的合成记忆（默认关闭，生产行为不变）
+                    # 用于回答「历史合成层是否在占用 top-k 槽位、是否损害召回」
+                    if _EXCLUDE_SYNTH and _prov_class == "synthesized":
+                        continue
+                    results.append({
+                        "file": f"semantic#{nid}",
+                        "source_line": _src,          # P1：可回溯坐标（历史节点为 None）
+                        "prov_sha": _sha,
+                        "prov_session_id": n.get("session_id"),
+                        "prov_class": _prov_class,
+                        "role": "fact",
+                        "content": snippet_around(text, tokens, window=100),
+                        "ts": None,
+                        "layer": "facts",
+                        "node_id": nid,
+                        "confidence": conf,
+                        "event_time": n.get("event_time") or None,
+                        "created_at": n.get("created_at") or None,
+                    })
+            except Exception:
+                continue
+        return results
+
+    results = _run(tokens)
+    # 兜底：整句 0 命中时补二元组（短查询/新词场景）
+    if not results and _fallback:
+        results = _run(_fallback)
     return results[:max_results]
 
 
@@ -420,6 +644,7 @@ def search_skills(keyword: str, max_results: int = 5) -> list[dict]:
             if n > 0:
                 results.append({
                     "file": f"skills/{name}",
+                    "prov_class": "curated",   # P2：技能文档是人工维护，不派生自 L1
                     "role": "skill",
                     "content": f"[{name}] {desc[:150]}",
                     "ts": None,
@@ -629,12 +854,19 @@ def apply_time_gate(pm_results: list[dict], keyword: str) -> tuple[list[dict], b
 def result_to_json(r: dict) -> dict:
     ts = r.get("ts")
     ts_str = ts.isoformat() if isinstance(ts, datetime) else (str(ts) if ts else None)
-    return {
+    out = {
         "file": r.get("file"),
         "role": r.get("role"),
         "content": r.get("content"),
         "ts": ts_str,
     }
+    # provenance 字段必须显式透传：这个函数是白名单式的，漏掉就等于整条链路空转。
+    # （P1/P2 都曾在这里被静默丢弃：search_plugmem 里加好了字段，输出时却没了。）
+    for k in ("source_line", "prov_sha", "prov_session_id", "prov_class", "node_id",
+              "layer", "confidence", "event_time"):
+        if k in r:
+            out[k] = r[k]
+    return out
 
 
 def format_ts(dt) -> str:
@@ -670,12 +902,13 @@ def print_results(results: list[dict], max_out: int = 15):
 # ============================================================
 
 def do_search_all(keyword: str, hours: int, exclude: set) -> dict:
+    kw = normalize_query(keyword)          # W3-3：子串层用改写后的检索词
     skills = search_skills(keyword, max_results=5)
     pm = search_plugmem(keyword, max_results=5)
     pm, time_gate_applied = apply_time_gate(pm, keyword)
-    sess = search_sessions(keyword, hours=hours, max_results=10, exclude_sessions=exclude)
-    logs = search_daily_logs(keyword, max_results=5)
-    facts = search_fact_files(keyword, max_results=5)
+    sess = search_sessions(kw, hours=hours, max_results=10, exclude_sessions=exclude)
+    logs = search_daily_logs(kw, max_results=5)
+    facts = search_fact_files(kw, max_results=5)
     total = len(skills) + len(pm) + len(sess) + len(logs) + len(facts)
     return {"skills": skills, "pm": pm, "sess": sess, "logs": logs, "facts": facts, "total": total, "time_gate_applied": time_gate_applied}
 

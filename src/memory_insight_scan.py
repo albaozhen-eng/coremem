@@ -409,6 +409,14 @@ def main():
     parser.add_argument("--search", type=str, help="搜索语义索引（调试用）")
     
     args = parser.parse_args()
+
+    # 2026-10-19 AUTO 区块退役（Brian 拍板）：默认拒绝写入，防止旧管线把过期快照写回来。
+    # 需要临时恢复：MEMORY_AUTO_ENABLE=1 python3 memory_insight_scan.py --sync --write
+    import os as _os
+    if (args.write or args.sync_compiled_truth) and _os.environ.get("MEMORY_AUTO_ENABLE") != "1":
+        print("[retired] AUTO 区块已退役（2026-10-19）。事实来源为 L1 每日笔记；"
+              "如确需恢复，设置 MEMORY_AUTO_ENABLE=1 后重跑。")
+        return 3
     
     if args.check:
         health = check_health()
@@ -439,4 +447,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    _sys.exit(main() or 0)
