@@ -44,7 +44,7 @@ ALIASES_FILE = DATA_DIR / "search_aliases.json"
 SCORES_FILE = DATA_DIR / "memory_scores" / "scores.json"
 DECAY_POLICY_FILE = DATA_DIR / "decay_policy.json"
 
-_PC = plugmem_cfg()  # env > ~/.openclaw/openclaw.json > default
+_PC = plugmem_cfg()  # env > ~/.coremem/plugmem/config.json > default
 SEMANTIC_BASE_URL = _PC["base_url"]
 SEMANTIC_API_KEY = _PC["api_key"]
 SEMANTIC_GRAPH_ID = _PC["graph_id"]

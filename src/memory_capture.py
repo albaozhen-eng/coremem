@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 # ---------------------------------------------------------------------------
-# 耦合现状（2026-11-02 入库说明，原样保留代码，仅加此注释）
-# 本文件是 coremem 里唯一仍依赖旧宿主 OpenClaw 的捕获器。它扫三源：
-#   ① ~/.openclaw/agents/main/sessions/*.jsonl            —— 历史归档
-#   ② ~/.openclaw/.../openclaw-agent.sqlite transcript_events —— 09-01 迁移后只读连接
-#   ③ ~/.pi/agent/sessions/<project>/*.jsonl              —— 日常主力源
-# ①② 仅用于历史回填，③ 是现在的真实来源。待拆分方案见 DEPLOY.md「已知残留耦合」：
-#   memory_capture.py（只读 pi） + migrate_openclaw_archive.py（一次性回填，可删）。
-# 注意：删掉 ~/.openclaw 不会立刻报错，①② 会静默扫空——capture 仍然工作，只是不再回填历史。
+# 数据源（2026-11-03 解耦）：默认只扫 pi 会话。OpenClaw 历史归档由
+# openclaw_archive.py 只读适配器提供，只有 --sources openclaw|all 时才加载。
+# 一次性历史回填入口：migrate_openclaw_archive.py。
 # ---------------------------------------------------------------------------
 """
 memory_capture.py v1.3 — 会话自动捕获器（含 Triage Gate，三源扫描）
@@ -25,7 +20,7 @@ v1.4 变更（2026-09-11 通道链韧性修复，.bak.20260911-chan）：
     bailian qwen3.8-flash。每通道独立 timeout + 单次重试。
   - deepseek-official 退役注释（HTTP 402 余额尽，2026-09-11 实证多轮全链失败）。
   - omlx 端点从 ~/.boss-agent/llm-policy.json 读（local_model / local_base），
-    缺省回落 openclaw.json providers.omlx.baseUrl，再缺省 127.0.0.1:9999/v1。
+    现由 coremem providers 配置 / MEM_OMLX_BASE_URL 提供，缺省 127.0.0.1:9999/v1。
   - 测试钩子：MEMORY_CAPTURE_SKIP_CHANNELS="local-omlx-flash,bailian" 可跳过指定通道
     （断网演练/降级验证用，正常运行不设置）。
   - 提取 prompt、JSON 输出格式、Triage Gate、调度参数一律未动（unified-facts 下游格式锁死）。
@@ -52,6 +47,7 @@ v1.2 变更（2026-08-12 P3，qwen3.8-max 审核后实施）：
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -59,15 +55,24 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-SESSIONS_DIR = Path.home() / ".openclaw" / "agents" / "main" / "sessions"
-# v1.3（2026-09-11）：扩展扫描源
-#   - OpenClaw 2026.8.1（09-01 升级）后 session 迁入 SQLite transcript_events，*.jsonl 不再产生
-#   - 日常主战场迁移到 pi（~/.pi/agent/sessions/<project>/<ts>_<uuid>.jsonl）
-OPENCLAW_DB = Path.home() / ".openclaw" / "agents" / "main" / "agent" / "openclaw-agent.sqlite"
 PI_SESSIONS_DIR = Path.home() / ".pi" / "agent" / "sessions"
-# v1.5（2026-10-03 定点回溯）：09-01 SQLite 迁移前的 OpenClaw jsonl 原始文件被移入此归档目录。
-# --since/--until 回溯 08-12 等历史窗口时必须扫这里（SESSIONS_DIR 的 live *.jsonl 已清空，mtime 也停在迁移前）。
-IMPORT_ARCHIVE_DIR = Path.home() / ".openclaw" / "agents" / "main" / "session-sqlite-import-archive"
+VALID_SOURCES = ("pi", "openclaw", "all")
+
+
+def _openclaw_archive():
+    """Load the optional legacy adapter only when explicitly requested."""
+    from openclaw_archive import OpenClawArchive
+    return OpenClawArchive()
+
+
+def _providers_config() -> dict:
+    """Optional coremem-local provider config; never reads OpenClaw config."""
+    import os
+    path = Path(os.environ.get("MEM_PROVIDERS_CONFIG", str(Path.home() / ".coremem/config/providers.json")))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
 REMEMBER_SCRIPT = Path.home() / ".coremem" / "scripts" / "remember.py"
 STATE_FILE = Path.home() / ".coremem" / "data" / "memory_capture_state.json"
 GATE_LOG_DIR = Path.home() / ".coremem" / "logs" / "memory-gate"
@@ -249,44 +254,21 @@ def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
 
-def get_recent_sessions(hours: float = 1) -> list[dict]:
-    """获取最近 N 小时有活动的 session（v1.3：三源扫描）。
-
-    返回描述符列表：{'stem','kind','mtime','hash','path'|'session_id'}
-      kind='jsonl'   → OpenClaw 旧版 *.jsonl + pi 会话（格式兼容：type=message, message.role/content）
-      kind='sqlite'  → OpenClaw 2026.8.1+ transcript_events 表
-    """
+def get_recent_sessions(hours: float = 1, sources: str = "pi") -> list[dict]:
+    """获取最近 N 小时有活动的 session；默认只读 pi，历史源需显式启用。"""
     cutoff = (now() - timedelta(hours=hours)).timestamp()
     sessions = []
-    # 源1：OpenClaw 旧版 jsonl（历史归档，升级后不再新增）
-    for f in SESSIONS_DIR.glob("*.jsonl"):
-        if f.stat().st_mtime >= cutoff:
-            sessions.append({"stem": f.stem, "kind": "jsonl", "path": f,
-                             "mtime": f.stat().st_mtime, "hash": None})
-    # 源2：pi 会话 jsonl（<project-dir>/<ts>_<uuid>.jsonl）
-    try:
-        for f in PI_SESSIONS_DIR.glob("*/*.jsonl"):
-            if f.stat().st_mtime >= cutoff:
-                sessions.append({"stem": f"pi-{f.stem}", "kind": "jsonl", "path": f,
-                                 "mtime": f.stat().st_mtime, "hash": None})
-    except Exception as e:
-        print(f"[memory_capture] ⚠️ pi 会话目录扫描失败: {e}", file=sys.stderr)
-    # 源3：OpenClaw SQLite transcript_events（只读连接，避免锁库）
-    if OPENCLAW_DB.exists():
+    # pi 会话 jsonl（<project-dir>/<ts>_<uuid>.jsonl）
+    if sources in ("pi", "all"):
         try:
-            import sqlite3
-            con = sqlite3.connect(f"file:{OPENCLAW_DB}?mode=ro", uri=True, timeout=5)
-            rows = con.execute(
-                "SELECT session_id, COUNT(*), MAX(created_at) FROM transcript_events "
-                "GROUP BY session_id HAVING MAX(created_at) >= ?",
-                (int(cutoff * 1000),),
-            ).fetchall()
-            con.close()
-            for sid, cnt, max_ts in rows:
-                sessions.append({"stem": f"oc-{sid}", "kind": "sqlite", "session_id": sid,
-                                 "mtime": max_ts / 1000, "hash": f"{max_ts}:{cnt}"})
+            for f in PI_SESSIONS_DIR.glob("*/*.jsonl"):
+                if f.stat().st_mtime >= cutoff:
+                    sessions.append({"stem": f"pi-{f.stem}", "kind": "jsonl", "path": f,
+                                     "mtime": f.stat().st_mtime, "hash": None})
         except Exception as e:
-            print(f"[memory_capture] ⚠️ OpenClaw SQLite 扫描失败: {e}", file=sys.stderr)
+            print(f"[memory_capture] ⚠️ pi 会话目录扫描失败: {e}", file=sys.stderr)
+    if sources in ("openclaw", "all"):
+        sessions.extend(_openclaw_archive().get_recent_sessions(hours))
     return sorted(sessions, key=lambda d: d["mtime"], reverse=True)
 
 
@@ -317,62 +299,28 @@ def _message_time_range_jsonl(filepath: Path) -> tuple:
     return tmin, tmax
 
 
-def get_sessions_in_window(since_dt, until_dt) -> list[dict]:
+def get_sessions_in_window(since_dt, until_dt, sources: str = "pi") -> list[dict]:
     """v1.5 定点回溯：按会话内真实消息时间戳筛选（非 mtime）。
 
-    扫描历史源（不做 mtime 过滤）：
-      - import-archive（09-01 迁移前的 OpenClaw jsonl，SESSIONS_DIR live jsonl 已清空）
-      - pi 会话 jsonl
-      - OpenClaw SQLite transcript_events
+    默认只扫描 pi；OpenClaw 历史源仅在 sources=openclaw|all 时经适配器扫描。
     只保留消息时间戳与 [since_dt, until_dt] 重叠的 session。since_dt/until_dt 为 tz-aware（UTC）。
     """
     sessions = []
-    # 源 A：import-archive（迁移前 OpenClaw jsonl）
-    if IMPORT_ARCHIVE_DIR.exists():
+    # pi 会话 jsonl
+    if sources in ("pi", "all"):
         try:
-            for f in IMPORT_ARCHIVE_DIR.glob("*.jsonl.imported-*"):
-                if "trajectory" in f.name:
-                    continue
+            for f in PI_SESSIONS_DIR.glob("*/*.jsonl"):
                 tmin, tmax = _message_time_range_jsonl(f)
                 if tmin is None:
                     continue
                 if tmax < since_dt or tmin > until_dt:
                     continue
-                sessions.append({"stem": f"ia-{f.stem}", "kind": "jsonl", "path": f,
+                sessions.append({"stem": f"pi-{f.stem}", "kind": "jsonl", "path": f,
                                  "mtime": f.stat().st_mtime, "hash": None})
         except Exception as e:
-            print(f"[memory_capture] ⚠️ import-archive 扫描失败: {e}", file=sys.stderr)
-    # 源 B：pi 会话 jsonl
-    try:
-        for f in PI_SESSIONS_DIR.glob("*/*.jsonl"):
-            tmin, tmax = _message_time_range_jsonl(f)
-            if tmin is None:
-                continue
-            if tmax < since_dt or tmin > until_dt:
-                continue
-            sessions.append({"stem": f"pi-{f.stem}", "kind": "jsonl", "path": f,
-                             "mtime": f.stat().st_mtime, "hash": None})
-    except Exception as e:
-        print(f"[memory_capture] ⚠️ pi 会话目录扫描失败: {e}", file=sys.stderr)
-    # 源 C：OpenClaw SQLite transcript_events（只读）
-    if OPENCLAW_DB.exists():
-        try:
-            import sqlite3
-            con = sqlite3.connect(f"file:{OPENCLAW_DB}?mode=ro", uri=True, timeout=5)
-            rows = con.execute(
-                "SELECT session_id, COUNT(*), MIN(created_at), MAX(created_at) FROM transcript_events "
-                "GROUP BY session_id",
-            ).fetchall()
-            con.close()
-            for sid, cnt, min_ts, max_ts in rows:
-                tmin = datetime.fromtimestamp(min_ts / 1000, tz=timezone.utc)
-                tmax = datetime.fromtimestamp(max_ts / 1000, tz=timezone.utc)
-                if tmax < since_dt or tmin > until_dt:
-                    continue
-                sessions.append({"stem": f"oc-{sid}", "kind": "sqlite", "session_id": sid,
-                                 "mtime": max_ts / 1000, "hash": f"{max_ts}:{cnt}"})
-        except Exception as e:
-            print(f"[memory_capture] ⚠️ OpenClaw SQLite 扫描失败: {e}", file=sys.stderr)
+            print(f"[memory_capture] ⚠️ pi 会话目录扫描失败: {e}", file=sys.stderr)
+    if sources in ("openclaw", "all"):
+        sessions.extend(_openclaw_archive().get_sessions_in_window(since_dt, until_dt))
     return sorted(sessions, key=lambda d: d["mtime"])
 
 
@@ -382,45 +330,8 @@ def extract_conversation(src, since=None, until=None) -> str:
     if isinstance(src, (str, Path)):
         src = {"kind": "jsonl", "path": Path(src)}
     if src["kind"] == "sqlite":
-        return _conversation_from_sqlite(src["session_id"], since, until)
+        return _openclaw_archive().extract_conversation(src, since, until)
     return _conversation_from_jsonl(Path(src["path"]), since, until)
-
-
-def _conversation_from_sqlite(session_id: str, since=None, until=None) -> str:
-    lines = []
-    windowed = since is not None or until is not None
-    try:
-        import sqlite3
-        con = sqlite3.connect(f"file:{OPENCLAW_DB}?mode=ro", uri=True, timeout=5)
-        if windowed:
-            rows = con.execute(
-                "SELECT event_json, created_at FROM transcript_events WHERE session_id=? ORDER BY seq",
-                (session_id,),
-            ).fetchall()
-        else:
-            rows = con.execute(
-                "SELECT event_json FROM transcript_events WHERE session_id=? ORDER BY seq",
-                (session_id,),
-            ).fetchall()
-        con.close()
-        for row in rows:
-            if windowed:
-                event_json, created_at = row
-                dt = datetime.fromtimestamp(created_at / 1000, tz=timezone.utc)
-                if since is not None and dt < since:
-                    continue
-                if until is not None and dt > until:
-                    continue
-            else:
-                event_json = row[0]
-            try:
-                d = json.loads(event_json)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            _append_message_line(d, lines)
-    except Exception:
-        pass
-    return "\n".join(lines if windowed else lines[-40:])
 
 
 def _conversation_from_jsonl(filepath: Path, since=None, until=None) -> str:
@@ -462,6 +373,8 @@ def main():
     parser.add_argument("--max-sessions", type=int, default=3, help="单次最多处理 session 数（默认 3，防超时）")
     parser.add_argument("--continue-on-error", action="store_true", help="补跑模式：单 session 提取失败跳过续跑（连续≥5次失败才停），默认失败即停防连环限流")
     parser.add_argument("--audit-skipped", action="store_true", help="审计最近 gate 记录（默认近 7 天）")
+    parser.add_argument("--sources", choices=VALID_SOURCES, default="pi",
+                        help="数据源：pi（默认）/ openclaw（仅历史归档）/ all")
     args = parser.parse_args()
     
     try:
@@ -487,7 +400,7 @@ def main():
                 since = since.astimezone(timezone.utc) if since else None
                 until = until.astimezone(timezone.utc) if until else None
             capture(hours=args.hours, dry_run=args.dry_run, force=args.force, max_sessions=args.max_sessions,
-                    continue_on_error=args.continue_on_error, since=since, until=until)
+                    continue_on_error=args.continue_on_error, since=since, until=until, sources=args.sources)
     except KeyboardInterrupt:
         print("\n中断")
     except Exception as e:
@@ -516,8 +429,7 @@ def extract_facts_with_llm(conversation: str) -> list[str]:
     """用 v4-flash 从对话中提取事实（v1.2：去掉 extract_facts.py 死引用）"""
     if len(conversation) < 100:
         return []
-    # v1.2 P3：extract_facts.py 不存在（死引用），直接走 extract_via_openclaw
-    return extract_via_openclaw(conversation)
+    return extract_facts_via_llm(conversation)
 
 
 def _build_llm_channels(default_timeout: int) -> list[dict]:
@@ -531,12 +443,9 @@ def _build_llm_channels(default_timeout: int) -> list[dict]:
       4. bailian-qwen       qwen3.8-flash（同端点稳定出文兜底）
     每通道独立 timeout + 单次重试（见 _llm_chat）。
     """
-    cfg_path = Path.home() / ".openclaw" / "openclaw.json"
-    try:
-        cfg = json.loads(cfg_path.read_text())
-    except Exception:
-        cfg = {}
-    providers = cfg.get("models", {}).get("providers", {}) or {}
+    raw_cfg = _providers_config()
+    providers = (raw_cfg.get("models", {}).get("providers", {})
+                 or raw_cfg.get("providers", {}) or raw_cfg)
 
     # llm-policy.json：本地模型与端点（primary=local-omlx-flash 策略源）
     try:
@@ -547,16 +456,18 @@ def _build_llm_channels(default_timeout: int) -> list[dict]:
     channels = []
 
     # 通道 1：local-omlx-flash（本机 omlx，主力）。端点解析：policy.local_base →
-    # openclaw providers.omlx.baseUrl → 127.0.0.1:9999/v1。本地无 402/配额问题，
+    # coremem providers.omlx.baseUrl → 127.0.0.1:9999/v1。本地无 402/配额问题，
     # timeout 用调用方值（提取 90s / triage 30s 足够；实测提取 6000 字 <70s）。
-    local_base = (policy.get("local_base") or policy.get("omlx_base")
+    local_base = (os.environ.get("MEM_OMLX_BASE_URL")
+                  or policy.get("local_base") or policy.get("omlx_base")
                   or providers.get("omlx", {}).get("baseUrl")
                   or "http://127.0.0.1:9999/v1")
     channels.append({
         "name": "local-omlx-flash",
         "url": local_base.rstrip("/") + "/chat/completions",
-        "model": policy.get("local_model") or "Qwen3.8-Flash-Next-oQ4e-mtp",
-        "key": providers.get("omlx", {}).get("apiKey") or "omlx-local",
+        "base_url": local_base.rstrip("/"),
+        "model": os.environ.get("MEM_OMLX_MODEL") or policy.get("local_model") or "Qwen3.8-Flash-Next-oQ4e-mtp",
+        "key": os.environ.get("MEM_OMLX_API_KEY") or providers.get("omlx", {}).get("apiKey") or "omlx-local",
         "timeout": max(int(default_timeout), 30),
     })
 
@@ -579,7 +490,7 @@ def _build_llm_channels(default_timeout: int) -> list[dict]:
         })
 
     # 通道 3：scnet-tp DeepSeek-V4-Flash（免费镜像，独立供应商避免同端点连坐）
-    scnet_key = providers.get("scnet-tp", {}).get("apiKey", "")
+    scnet_key = os.environ.get("SCNET_API_KEY") or providers.get("scnet-tp", {}).get("apiKey", "")
     scnet_base = providers.get("scnet-tp", {}).get("baseUrl", "") or "https://api.scnet.cn/api/llm/v1"
     if scnet_key:
         channels.append({
@@ -633,18 +544,13 @@ def _llm_chat(prompt: str, max_tokens: int, temperature: float, timeout: int = 2
     if not channels:
         return None
 
-    # 2026-09-12 omlx 闲时休眠（Brian 指令）：通道1 local-omlx-flash 使用前先唤醒——
-    # 休眠中则 launchctl bootstrap + 等模型热加载（≤60s）；超时剔除本地通道回落百炼（不断链）。
-    # 唤醒器自身异常 fail-open：不动通道链，让原有重试/降级逻辑兜底。
-    if any(c["name"] == "local-omlx-flash" for c in channels):
+    # coremem 自有唤醒器：不再向 OpenClaw 脚本目录注入 sys.path。
+    local_channel = next((c for c in channels if c["name"] == "local-omlx-flash"), None)
+    if local_channel:
         try:
-            import os as _os, sys as _sys
-            _d = _os.path.join(_os.path.expanduser("~"), ".openclaw/workspace/scripts")
-            if _d not in _sys.path:
-                _sys.path.insert(0, _d)
-            import omlx_wake
-            if not omlx_wake.ensure_omlx(timeout=90):   # 2026-09-14 ds4审计P2：60s→90s（唤醒峰值实测 50.8s）
-                print("[memory_capture] omlx 休眠唤醒超时(90s)，本轮回落百炼", file=sys.stderr)
+            from omlx_runtime import ensure_omlx
+            if not ensure_omlx(timeout=90, base_url=local_channel["base_url"], model=local_channel["model"]):
+                print("[memory_capture] omlx 唤醒超时(90s)，剔除本地通道", file=sys.stderr)
                 channels = [c for c in channels if c["name"] != "local-omlx-flash"]
         except Exception as _e:
             print(f"[memory_capture] ensure_omlx 异常（fail-open，按原通道链继续）: {_e}", file=sys.stderr)
@@ -699,7 +605,7 @@ def _llm_chat(prompt: str, max_tokens: int, temperature: float, timeout: int = 2
     return None
 
 
-def extract_via_openclaw(conversation: str) -> list[str]:
+def extract_facts_via_llm(conversation: str) -> list[str]:
     import urllib.request
     import urllib.error
 
@@ -733,14 +639,14 @@ def extract_via_openclaw(conversation: str) -> list[str]:
     return facts
 
 
+# Backward-compatible name for older callers; extraction itself no longer uses OpenClaw.
+extract_via_openclaw = extract_facts_via_llm
+
+
 def get_bailian_api_key() -> str:
-    """获取百炼 API key"""
-    try:
-        cfg_path = Path.home() / ".openclaw" / "openclaw.json"
-        cfg = json.loads(cfg_path.read_text())
-        return cfg.get("models", {}).get("providers", {}).get("bailian", {}).get("apiKey", "")
-    except Exception:
-        return ""
+    """兼容旧调用方；百炼已退役，默认无 key。"""
+    providers = _providers_config().get("providers", {})
+    return providers.get("bailian", {}).get("apiKey", "")
 
 
 # P3：确定性事件时间推断（不依赖 LLM 打标）
@@ -792,12 +698,12 @@ def file_hash(filepath: Path) -> str:
 
 def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_sessions: int = 3,
             continue_on_error: bool = False, since: Optional[datetime] = None,
-            until: Optional[datetime] = None):
+            until: Optional[datetime] = None, sources: str = "pi"):
     """主捕获流程
 
     v1.1 修复：
       - 加 max_sessions 上限（默认 3），防止串行 LLM 提取超时
-      - dry-run 也计入 processed（修计数 bug）
+      - dry-run 输出处理计数，但不持久化 processed 状态
     v1.2 P3：
       - Triage Gate：会话过门控（正则+LLM）才提取，meta-noise 直接拦截并留痕
       - gate_stats 记入 state（total/gated/passed）
@@ -805,14 +711,16 @@ def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_se
       - since/until（tz-aware UTC）非空时走 get_sessions_in_window（按消息时间戳筛选），
         否则走 get_recent_sessions（mtime，原行为）。缺省完全不变。
     """
+    if sources not in VALID_SOURCES:
+        raise ValueError(f"未知数据源 {sources!r}，可选 {VALID_SOURCES}")
     state = load_state()
     window_mode = since is not None or until is not None
     if window_mode:
         print(f"[memory_capture] 定点回溯模式：按消息时间戳筛选 "
               f"[{since.isoformat() if since else '-∞'}, {until.isoformat() if until else '+∞'}]")
-        sessions = get_sessions_in_window(since, until)
+        sessions = get_sessions_in_window(since, until, sources=sources)
     else:
-        sessions = get_recent_sessions(hours=hours)
+        sessions = get_recent_sessions(hours=hours, sources=sources)
 
     if not sessions:
         if window_mode:
@@ -861,7 +769,7 @@ def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_se
             continue
         
         # 提取事实
-        facts = extract_via_openclaw(conversation)
+        facts = extract_facts_via_llm(conversation)
         
         if facts is None:
             # LLM 调用失败（如限流/推理模型吃空 tokens）：不标记 processed，下次自动重试。
@@ -900,7 +808,9 @@ def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_se
         state["processed_sessions"][stem] = fh
         processed += 1
     
-    save_state(state)
+    # dry-run 只预览，不落 processed/gate 状态；否则正式回填会误跳过已预览会话。
+    if not dry_run:
+        save_state(state)
     print(f"\n[memory_capture] 完成: {processed} 个 session, {total_facts} 条事实, {gated} 个被 gate")
 
 

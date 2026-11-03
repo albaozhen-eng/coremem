@@ -37,7 +37,7 @@ MAX_L2_RETRY = 3  # L2 回查未落地时的最大重试次数；超过才判 mi
 BUFFER_PATH = DATA_DIR / "memory_buffer.jsonl"
 CODE_MEM_PATH = DATA_DIR / "codex_memory_buffer.jsonl"
 
-_PC = plugmem_cfg()  # env > ~/.openclaw/openclaw.json > default
+_PC = plugmem_cfg()  # env > ~/.coremem/plugmem/config.json > default
 SEMANTIC_BASE_URL = _PC["base_url"]
 SEMANTIC_API_KEY = _PC["api_key"]
 SEMANTIC_GRAPH_ID = _PC["graph_id"]

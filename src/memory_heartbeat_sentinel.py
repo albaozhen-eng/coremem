@@ -17,10 +17,10 @@ failureAlert=false，坏了不吭声）。这是「静默失败」的直接根�
 再提醒一次。恢复后自动清该 reason 的 state（下次 stale 重新计）。
 
 铁律：不调任何模型；只读记忆文件、只写自己的 state；不碰记忆/台账数据；不抢浏览器。
-飞书通道复用 boss-notify.py（send/token/api）。
+飞书通道由 coremem 自有 notify.py 提供；不复用会屏蔽基础设施标题的招聘通知脚本。
 
 2026-09-11 通道修复追加（.bak.20260911-chan）：
-  ③ LLM 本地服务体检：omlx（llm-policy/openclaw 实际端口，缺省 127.0.0.1:9999）+
+  ③ LLM 本地服务体检：omlx（环境变量/llm-policy/coremem providers 配置，缺省 127.0.0.1:9999）+
      PlugMem（127.0.0.1:8089/api/v1/health）。任一挂 → 复用同一飞书通道告警（独立 reason 去重）。
      只 GET /v1/models 与 /health，不发起任何模型推理，不违反「不调模型」铁律。
 
@@ -29,7 +29,6 @@ failureAlert=false，坏了不吭声）。这是「静默失败」的直接根�
   python3 memory_heartbeat_sentinel.py --test     # 强制发一条自检告警（验证通道），不改 state
   python3 memory_heartbeat_sentinel.py --status   # 只打印当前体检结果，不告警不写 state
 """
-import importlib.util
 import json
 import os
 import sys
@@ -38,13 +37,14 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import notify
+
 HOME = Path.home()
 MEM_WS = HOME / ".coremem/logs"
 MEM_MAIN = HOME / ".coremem/memory"
 CAPTURE_LOG = MEM_WS / "memory_capture_30m.log"          # 调度活性信号源
 FACTS = MEM_MAIN / "unified-facts.jsonl"                  # 管道产能信号源（remember.py 实际落库处）
 STATE_F = MEM_WS / "heartbeat-sentinel-state.json"
-NOTIFY = HOME / ".openclaw/workspace/scripts/boss-notify.py"  # 招聘通知脚本，仍属 OpenClaw
 
 SCHED_STALE_MIN = 90          # 30min 调度，留 3 倍余量
 FACT_STALE_H = 26             # 报告口径：>26h 无 capture 即告警
@@ -55,8 +55,10 @@ SVC_PROBE_TIMEOUT = 5         # 本地端点探活超时（秒）
 
 
 def omlx_base_url() -> str:
-    """omlx 实际端点：llm-policy.json local_base → openclaw providers.omlx.baseUrl → 9999 缺省。
-    与 memory_capture.py v1.4 通道链同源解析，保证体检对象=实际在用通道。"""
+    """Resolve the same local endpoint as capture, without OpenClaw config."""
+    env_base = os.environ.get("MEM_OMLX_BASE_URL")
+    if env_base:
+        return env_base.rstrip("/")
     try:
         policy = json.loads((HOME / ".boss-agent/llm-policy.json").read_text())
         base = policy.get("local_base") or policy.get("omlx_base")
@@ -64,9 +66,11 @@ def omlx_base_url() -> str:
             return base.rstrip("/")
     except Exception:
         pass
+    path = Path(os.environ.get("MEM_PROVIDERS_CONFIG", str(HOME / ".coremem/config/providers.json")))
     try:
-        cfg = json.loads((HOME / ".openclaw/openclaw.json").read_text())
-        base = cfg.get("models", {}).get("providers", {}).get("omlx", {}).get("baseUrl", "")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        providers = raw.get("models", {}).get("providers", {}) or raw.get("providers", {}) or raw
+        base = providers.get("omlx", {}).get("baseUrl", "")
         if base:
             return base.rstrip("/")
     except Exception:
@@ -85,13 +89,6 @@ def _probe(url: str) -> tuple[bool, str]:
             return False, f"HTTP {resp.status}"
     except Exception as e:
         return False, str(e)
-
-
-def _load_notify():
-    spec = importlib.util.spec_from_file_location("boss_notify", str(NOTIFY))
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
 
 
 def log(msg):
@@ -167,7 +164,7 @@ def check():
     omlx_base = omlx_base_url()
     ok, detail = _probe(omlx_base + "/models")
     if not ok:
-        problems.append(("omlx_down", f"本地 LLM omlx 挂：{omlx_base}/models 探活失败（{detail}）— memory_capture 主力通道不可用，将降级云端（有 402/超时风险）"))
+        problems.append(("omlx_down", f"本地 LLM omlx 挂：{omlx_base}/models 探活失败（{detail}）— memory_capture 主力通道不可用；当前无云端备胎时提取会失败并留待下轮"))
     ok, detail = _probe(PLUGMEM_HEALTH)
     if not ok:
         problems.append(("plugmem_down", f"PlugMem 挂：{PLUGMEM_HEALTH} 探活失败（{detail}）— 事实写入将落 buffer，召回不可用"))
@@ -189,9 +186,7 @@ def should_alert(st, reason):
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     if mode == "--test":
-        n = _load_notify()
-        cfg = n.jload(n.CFG)
-        ok = n.send(cfg, "🫀 记忆链心跳哨兵自检：通道连通正常。\n（这是 --test 强制发送，非真实告警）", title="记忆哨兵自检")
+        ok = notify.send("🫀 记忆链心跳哨兵自检：通道连通正常。\n（这是 --test 强制发送，非真实告警）", title="记忆哨兵自检")
         log(f"--test 飞书自检 {'✅ 送达' if ok else '🔴 失败'}")
         return 0 if ok else 1
 
@@ -228,17 +223,19 @@ def main():
     body += f"\n\n体检快照：调度活性 {sched_s}（阈 {SCHED_STALE_MIN}min）｜事实产能 {fact_s}（阈 {FACT_STALE_H}h）"
     body += "\n排查：launchctl list | grep memory-capture｜tail memory_capture_30m.log｜PlugMem :8089/api/v1/health"
     try:
-        n = _load_notify()
-        cfg = n.jload(n.CFG)
-        ok = n.send(cfg, body, title="🔴 记忆链断供告警")
+        ok = notify.send(body, title="🔴 记忆链断供告警")
     except Exception as e:
         log(f"🔴 飞书告警发送异常: {e!r}")
         ok = False
-    now = time.time()
-    for r, _ in to_send:
-        st.setdefault("alerts", {})[r] = now
-    save_state(st)
-    log(f"   飞书告警 {'✅ 已推送' if ok else '🔴 推送失败（state 已记，下轮重试）'}")
+    if ok:
+        now = time.time()
+        for r, _ in to_send:
+            st.setdefault("alerts", {})[r] = now
+        save_state(st)
+        log("   飞书告警 ✅ 已推送")
+    else:
+        # 失败不得写去重时间：下一轮巡检应立即重试，而不是静默 6 小时。
+        log("   飞书告警 🔴 推送失败（未记去重时间，下轮立即重试）")
     return 0
 
 

@@ -47,7 +47,7 @@ DATA_DIR = Path(_ED) if _ED else MEMORY_HOME / "data"
 TZ = timezone(timedelta(hours=8))
 PLUGMEM_TIMEOUT = 15
 
-_PC = plugmem_cfg()  # env > ~/.openclaw/openclaw.json > default
+_PC = plugmem_cfg()  # env > ~/.coremem/plugmem/config.json > default
 SEMANTIC_BASE_URL = _PC["base_url"]
 SEMANTIC_API_KEY = _PC["api_key"]
 SEMANTIC_GRAPH_ID = _PC["graph_id"]

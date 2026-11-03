@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] - 2026-11-03
+
+### Changed
+- Daily capture defaults to pi sessions only; OpenClaw history is an explicit read-only source with a one-shot backfill entry point.
+- Local omlx configuration/wake and Feishu alerting are owned by coremem rather than loaded from OpenClaw scripts.
+- Deployment now reads one `deploy/files.manifest` and drift-checks shell files too.
+
+### Fixed
+- Memory-outage alerts no longer pass through the recruiting notifier's title blocklist; failed sends remain immediately retryable.
+- `--dry-run` no longer marks sessions processed, so a preview cannot suppress the real backfill.
+
+### Added
+- Regression runner plus isolated tests for source selection, archive reads, wake, alert delivery/retry and deploy guards.
+
 ## [0.2.0] - 2026-09-06
 
 ### Added

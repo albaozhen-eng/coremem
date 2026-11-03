@@ -9,7 +9,8 @@
 ```bash
 git clone https://github.com/albaozhen-eng/coremem && cd coremem
 bash deploy/deploy.sh                      # 自动备份旧脚本→部署→装 pre-commit 隐私钩子→语法自检
-python3 ~/.openclaw/workspace/scripts/remember.py --status
+python3 ~/.coremem/scripts/remember.py --status
+python3 tests/run_all.py                      # 统一运行脚本式回归测试
 ```
 默认部署假设 coremem 自有目录结构（`~/.coremem/memory`、`~/.coremem/sessions`、graph `brian-main`）。
 不同 graph/工作区名称时：改 `deploy/patch_deploy.py` 顶部补丁值，或用 cron `--command-env` 注入 `MEM_*`（见 `coremem.env` 模板）。
@@ -33,16 +34,21 @@ bash deploy/deploy.sh --force        # 确需覆盖生产改动时才用
 - Windows 上 OpenClaw 工作区路径为 `%USERPROFILE%\.openclaw\...`，`Path.home()` 自适应。
 - 发布纪律：任何个人路径/域名/手机号不得进入 src、docs、README——pre-commit 的 secret_scan 会拦。
 
-## 已知残留耦合：~/.openclaw（2026-11-02 记录，待解耦）
+## OpenClaw 解耦现状（2026-11-03）
 
-coremem 已从 OpenClaw 解耦，但下列已入库脚本仍有**活动依赖**，不属于历史注释：
+- **日常采集只读 pi**：`memory_capture.py` 默认 `--sources pi`，不再读取 OpenClaw 的会话库、模型配置或唤醒脚本。
+- **历史归档显式可选**：`--sources openclaw|all` 才加载只读适配器 `openclaw_archive.py`；一次性回填使用 `migrate_openclaw_archive.py`，不会修改归档。
+- **omlx 本地管理**：`omlx_runtime.py` 负责健康检查、launchd 唤醒和热加载；端点优先级为 `MEM_OMLX_BASE_URL` → `~/.boss-agent/llm-policy.json` → `MEM_PROVIDERS_CONFIG` → 本机默认值。
+- **告警独立**：`notify.py` 直接使用本机飞书配置，不再复用招聘通知脚本。后者会按标题屏蔽“记忆链断供”，曾导致真实告警被当作成功吞掉。发送失败不写去重时间，下轮可立即重试。
+- **部署清单一处维护**：新增/退役部署文件只改 `deploy/files.manifest`；Python 与 shell 文件均纳入漂移检查。
 
-| 文件 | 依赖点 | 影响 |
-| --- | --- | --- |
-| `src/memory_heartbeat_sentinel.py:47` | `NOTIFY = ~/.openclaw/workspace/scripts/boss-notify.py`（飞书 send/token/api 通道） | 告警只能经该脚本外发；脚本或目录删除后，体检仍跑但**告警静默丢失** |
-| `src/memory_heartbeat_sentinel.py:68` | 读 `~/.openclaw/openclaw.json` 的 `providers.omlx.baseUrl` 推 omlx 端口 | 缺文件 → 回落 `127.0.0.1:9999`，不致命但仍属宿主耦合 |
-| `src/memory_capture.py` | **35 处**：扫 `~/.openclaw/agents/main/sessions/*.jsonl`、SQLite `transcript_events`、`session-sqlite-import-archive/`，并从 `openclaw.json` 取模型端点 | 主力源已是 pi 会话（三源之一），OpenClaw 两路仅用于历史归档回填；不迁走则 capture 会持续依赖旧宿主 |
+### 历史回填示例
 
-处置建议（未执行）：
-1. `memory_heartbeat_sentinel.py`：把通知抽成 `notify.py` 接口（`send(title, body)`），实现可选 Feishu/本地日志，OpenClaw 版本作为其中一种实现。
-2. `memory_capture.py`：拆成 `memory_capture.py`（只读 pi 会话）+ `migrate_openclaw_archive.py`（一次性历史回填，可安全删除）。
+```bash
+# 先限定时间窗并 dry-run（不写记忆，也不更新 processed 状态）
+python3 src/migrate_openclaw_archive.py --since 2026-08-12 --until '2026-08-12 23:59' --dry-run
+# 明确需要重处理时才加 --force；正常回填依赖 processed 状态防重
+python3 src/migrate_openclaw_archive.py --hours 24 --max-sessions 3
+```
+
+删除旧宿主目录不是部署步骤。若确需退役，先完成历史回填并保留备份，再单独评估其他工具的依赖。

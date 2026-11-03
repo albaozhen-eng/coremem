@@ -51,17 +51,19 @@ PATCHES = [
      'REPORTS_DIR = Path.home() / ".openclaw" / "workspace-main" / "memory" / "reports"'),
 ]
 
-FILES = ["plugmem_config.py", "remember.py", "memory_recall.py", "memory_write_buffer.py", "mo_common.py",
-         "memory_insight_scan.py", "morning_briefing.py", "vault_export.py",
-         # 2026-11-02：从活体回灌仓库的孤儿脚本（此前只存在于 ~/.coremem/scripts）
-         "golden_eval.py", "kis_eval.py", "memory_index.py", "plugmem_backup.py",
-         # 2026-11-02 第 2 批：这两份仍保留对 ~/.openclaw 的活动依赖，见 DEPLOY.md
-         "memory_health.py", "memory_heartbeat_sentinel.py",
-         # 2026-11-02 第 3 批：原样入库（仅加头部耦合注释），待拆分，见 DEPLOY.md
-         "memory_capture.py"]
+def _deployment_manifest(repo: Path):
+    """The single file list shared with deploy.sh; paths are repo-relative."""
+    paths = []
+    for line in (repo / "deploy/files.manifest").read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            paths.append(line)
+    return paths
 
-# 以 shell 脚本形式逐字节部署（不加 patch），像 secret_scan.py 一样直接复制。
-SH_FILES = ["plugmem-watchdog.sh", "run-plugmem-suite.sh"]
+
+_DEPLOY_PATHS = _deployment_manifest(repo)
+FILES = [Path(p).name for p in _DEPLOY_PATHS if p.startswith("src/")]
+SH_FILES = [Path(p).name for p in _DEPLOY_PATHS if p.startswith("scripts/")]
 
 dest.mkdir(parents=True, exist_ok=True)
 report = []
@@ -107,8 +109,8 @@ for name in SH_FILES:
 if args.check_drift:
     import difflib
     drift = []
-    for name in FILES:
-        src = repo / "src" / name
+    for name in FILES + SH_FILES:
+        src = repo / ("scripts" if name in SH_FILES else "src") / name
         live = dest / name
         if not src.exists() or not live.exists():
             continue

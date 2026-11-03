@@ -60,6 +60,7 @@ ALLOWLIST_DOMAINS = {
     "example.com", "example.org", "example.net",
     "api.app",  # 假阳性：plugmem.api.app:app 是 ASGI 模块路径，不是域名
     "scnet.cn",  # 公开 API 端点（国家超算互联网），非私有域名/非凭据
+    "feishu.cn",  # 飞书公开 API 域名（open.feishu.cn），非私有域名/非凭据
 }
 
 ALLOWLIST_IPS = {

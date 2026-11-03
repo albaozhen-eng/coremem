@@ -41,7 +41,7 @@ MEMORY_HOME = Path(os.environ.get("MEMORY_HOME", Path.home() / ".coremem"))
 MEMORY_MD = Path(os.environ.get("MEM_MEMORY_MD", MEMORY_HOME / "MEMORY.md"))
 DATA_DIR = Path(os.environ.get("MEM_DATA_DIR", MEMORY_HOME / "data"))
 
-_PC = plugmem_cfg()  # env > ~/.openclaw/openclaw.json > default
+_PC = plugmem_cfg()  # env > ~/.coremem/plugmem/config.json > default
 SEMANTIC_BASE_URL = _PC["base_url"]
 SEMANTIC_API_KEY = _PC["api_key"]
 SEMANTIC_GRAPH_ID = _PC["graph_id"]

@@ -54,7 +54,7 @@ L2_INLINE_BUDGET = 5.0   # 内联重试总耗时上限（秒），服务端过�
 BUFFER_FILE = DATA_DIR / "memory_buffer.jsonl"
 UNIFIED_FACTS_FILE = MEMORY_DIR / "unified-facts.jsonl"
 
-_PC = plugmem_cfg()  # env > ~/.openclaw/openclaw.json > default
+_PC = plugmem_cfg()  # env > ~/.coremem/plugmem/config.json > default
 SEMANTIC_BASE_URL = _PC["base_url"]
 SEMANTIC_API_KEY = _PC["api_key"]
 SEMANTIC_GRAPH_ID = _PC["graph_id"]

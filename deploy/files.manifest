@@ -1,0 +1,22 @@
+# One deployment file list, consumed by deploy/deploy.sh and deploy/patch_deploy.py.
+src/plugmem_config.py
+src/remember.py
+src/memory_recall.py
+src/memory_write_buffer.py
+src/mo_common.py
+src/memory_insight_scan.py
+src/morning_briefing.py
+src/vault_export.py
+src/golden_eval.py
+src/kis_eval.py
+src/memory_index.py
+src/plugmem_backup.py
+src/memory_health.py
+src/memory_heartbeat_sentinel.py
+src/memory_capture.py
+src/openclaw_archive.py
+src/omlx_runtime.py
+src/notify.py
+src/migrate_openclaw_archive.py
+scripts/plugmem-watchdog.sh
+scripts/run-plugmem-suite.sh
