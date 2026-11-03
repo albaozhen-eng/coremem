@@ -11,6 +11,23 @@
 - **本地优先，不锁定**——语义层兼容自托管的 [PlugMem](https://github.com/TIMAN-group/PlugMem)（约 800 行服务代码），也可以不要它——L1 文件本身就是真相。
 - **被打断也不会丢字**——所有失败写入落盘进 buffer、自动重放。生产环境经历断网、限流风暴、进程被杀之后：**零写入丢失**。
 
+## 一键安装（推荐）
+
+不想手动拼路径、也不想每天记得跑脚本，一条命令搞定：
+
+```bash
+git clone https://github.com/albaozhen-eng/coremem && cd coremem
+bash deploy/install.sh --deepseek-key sk-xxx      # 或 --local-model 用本机 omlx
+```
+
+它会：建 `~/.coremem/{scripts,memory,data,logs,config}` → 生成 `coremem.env` 与
+`config/providers.json`（0600）→ 部署 20 个脚本 → 装 6 个定时任务（采集/重放/简报/
+夜间编译/自检/备份）→ 冒烟自检。
+
+**新机器不需要改任何路径**：coremem 的默认布局就是 `~/.coremem`。只有"宿主平台老目录"
+（例如历史遗留的 `~/.openclaw` 机器）才需要用 `deploy/profiles/*.json` 做路径映射。
+重复执行幂等，会保留已有配置。
+
 ## 30 秒上手
 
 ```bash

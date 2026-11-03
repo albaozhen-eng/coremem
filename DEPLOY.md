@@ -1,5 +1,25 @@
 # coremem 部署指南（跨机器同步用）
 
+## 一键安装（新机器，零改动）
+
+```bash
+git clone https://github.com/albaozhen-eng/coremem && cd coremem
+bash deploy/install.sh --deepseek-key sk-xxx     # 云端通道；本机有 omlx 用 --local-model
+python3 deploy/scheduler.py status               # 6 个定时任务应全部在列
+```
+
+它把下面"新机器三步"的内容全包了，并且**不需要任何路径替换**——默认布局就是
+`~/.coremem`。只有历史宿主目录（如 `~/.openclaw`、`~/.plugmem/cli`）才需要 profile：
+
+| 场景 | 命令 |
+|---|---|
+| 全新机器 | `bash deploy/install.sh` |
+| 历史 OpenClaw 工作区 | `bash deploy/deploy.sh REPO DEST openclaw-scripts` |
+| plugmem-suite 独立部署 | `bash deploy/deploy.sh REPO ~/.plugmem/cli plugmem-suite-cli` |
+
+调度器也可以单独装卸：`python3 deploy/scheduler.py install|status|uninstall`
+（macOS 走 launchd，Linux 走用户 crontab）。
+
 ## 模型
 - **仓库（GitHub）= 唯一正统源**：平台无关，无隐私信息，可在任何电脑 `git pull`。
 - **生产部署 = 打补丁的副本**：`deploy/deploy.sh` 把 `src/*.py` 拷到 `~/.coremem/scripts/`（`--no-patch`，仓库默认值即现网值）；旧宿主 OpenClaw 的路径补丁仅在使用 `--profile openclaw-scripts` 时套用。
