@@ -3,6 +3,7 @@
   "_note": "替换按书写顺序生效：先带引号的多段拼接形式，后带斜杠的字面路径；最后是本机 omlx 端点/模型。",
   "exclude": ["run-plugmem-suite.sh"],
   "replacements": {
+    "Path.home() / \".coremem\" / \"plugmem\" / \"config.json\"": "Path.home() / \".plugmem\" / \"config\" / \"plugmem.json\"",
     "Path.home() / \".coremem\" / \"vault\" / \"Memory\"": "Path.home() / \"memory-vault\"",
     "os.environ.get(\"MEMORY_HOME\", Path.home() / \".openclaw\")": "os.environ.get(\"MEMORY_HOME\", Path.home() / \".plugmem\" / \"workspace\")",
     "\"HOME / \".coremem\" / \"health\"": "\"HOME / \".plugmem\" / \"logs\" / \"health\"",

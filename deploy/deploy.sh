@@ -69,6 +69,7 @@ fi
 
 # 语法自检（对活体已落盘的文件做检查；.py 走 py_compile，.sh 走 bash -n）
 for f in $DEPLOY_FILES; do
+  [ -e "$DEST/$f" ] || continue  # profile exclude 掉的文件不在这里
   case "$f" in
     *.py) python3 -m py_compile "$DEST/$f" && echo "✓ syntax ok: $f" ;;
     *.sh) bash -n "$DEST/$f" && echo "✓ shell syntax ok: $f" ;;
