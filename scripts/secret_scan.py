@@ -58,6 +58,7 @@ ALLOWLIST_DOMAINS = {
     "opensource.org", "apache.org",
     "google.com", "microsoft.com",
     "example.com", "example.org", "example.net",
+    "api.app",  # 假阳性：plugmem.api.app:app 是 ASGI 模块路径，不是域名
 }
 
 ALLOWLIST_IPS = {
