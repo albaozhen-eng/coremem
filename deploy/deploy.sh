@@ -20,7 +20,9 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 BAK="$DEST/.backup/coremem_predeploy_$STAMP"
 
 mkdir -p "$BAK"
-for f in plugmem_config.py remember.py memory_recall.py memory_write_buffer.py memory_insight_scan.py morning_briefing.py vault_export.py; do
+# 清单单一真源：与 deploy/patch_deploy.py 的 FILES + SH_FILES 保持一致（2026-11-02 统一）
+DEPLOY_FILES="plugmem_config.py remember.py memory_recall.py memory_write_buffer.py mo_common.py memory_insight_scan.py morning_briefing.py vault_export.py golden_eval.py kis_eval.py memory_index.py plugmem_backup.py plugmem-watchdog.sh run-plugmem-suite.sh"
+for f in $DEPLOY_FILES; do
   [ -f "$DEST/$f" ] && cp -p "$DEST/$f" "$BAK/" || true
 done
 echo "✓ 旧版已备份到 $BAK"
@@ -64,9 +66,12 @@ HOOK
   echo "✓ coremem 仓库 pre-commit hook 已安装（隐私泄露将阻断 commit/push 源头）"
 fi
 
-# 语法自检
-for f in "$DEST"/plugmem_config.py "$DEST"/remember.py "$DEST"/memory_recall.py "$DEST"/memory_write_buffer.py "$DEST"/memory_insight_scan.py "$DEST"/morning_briefing.py "$DEST"/vault_export.py; do
-  python3 -m py_compile "$f" && echo "✓ syntax ok: $(basename "$f")"
+# 语法自检（对活体已落盘的文件做检查；.py 走 py_compile，.sh 走 bash -n）
+for f in $DEPLOY_FILES; do
+  case "$f" in
+    *.py) python3 -m py_compile "$DEST/$f" && echo "✓ syntax ok: $f" ;;
+    *.sh) bash -n "$DEST/$f" && echo "✓ shell syntax ok: $f" ;;
+  esac
 done
 
 # 冒烟自检

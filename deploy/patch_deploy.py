@@ -52,7 +52,12 @@ PATCHES = [
 ]
 
 FILES = ["plugmem_config.py", "remember.py", "memory_recall.py", "memory_write_buffer.py", "mo_common.py",
-         "memory_insight_scan.py", "morning_briefing.py", "vault_export.py"]
+         "memory_insight_scan.py", "morning_briefing.py", "vault_export.py",
+         # 2026-11-02：从活体回灌仓库的孤儿脚本（此前只存在于 ~/.coremem/scripts）
+         "golden_eval.py", "kis_eval.py", "memory_index.py", "plugmem_backup.py"]
+
+# 以 shell 脚本形式逐字节部署（不加 patch），像 secret_scan.py 一样直接复制。
+SH_FILES = ["plugmem-watchdog.sh", "run-plugmem-suite.sh"]
 
 dest.mkdir(parents=True, exist_ok=True)
 report = []
@@ -82,6 +87,16 @@ if ss.exists():
     if not args.check_drift:
         (dest / "secret_scan.py").write_text(ss.read_text(encoding="utf-8"), encoding="utf-8")
     report.append("secret_scan.py: copied")
+
+for name in SH_FILES:
+    sh = repo / "scripts" / name
+    if not sh.exists():
+        report.append(f"MISSING {name}")
+        continue
+    if not args.check_drift:
+        (dest / name).write_text(sh.read_text(encoding="utf-8"), encoding="utf-8")
+        (dest / name).chmod(0o755)
+    report.append(f"{name}: copied")
 
 # 2026-10-30 事故：生产热修没回仓库，一次 deploy 把 memory_recall 的行级 IDF、
 # 别名扩展、AUTO 退役守卫全部回退，检索自检当场变红。部署前先比对，默认拒绝。
