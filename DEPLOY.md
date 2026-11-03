@@ -32,3 +32,17 @@ bash deploy/deploy.sh --force        # 确需覆盖生产改动时才用
 - 生产脚本被 launchd 直接引用路径（`~/.coremem/scripts/*.py`），deploy 即热更新，无需重启服务。
 - Windows 上 OpenClaw 工作区路径为 `%USERPROFILE%\.openclaw\...`，`Path.home()` 自适应。
 - 发布纪律：任何个人路径/域名/手机号不得进入 src、docs、README——pre-commit 的 secret_scan 会拦。
+
+## 已知残留耦合：~/.openclaw（2026-11-02 记录，待解耦）
+
+coremem 已从 OpenClaw 解耦，但下列已入库脚本仍有**活动依赖**，不属于历史注释：
+
+| 文件 | 依赖点 | 影响 |
+| --- | --- | --- |
+| `src/memory_heartbeat_sentinel.py:47` | `NOTIFY = ~/.openclaw/workspace/scripts/boss-notify.py`（飞书 send/token/api 通道） | 告警只能经该脚本外发；脚本或目录删除后，体检仍跑但**告警静默丢失** |
+| `src/memory_heartbeat_sentinel.py:68` | 读 `~/.openclaw/openclaw.json` 的 `providers.omlx.baseUrl` 推 omlx 端口 | 缺文件 → 回落 `127.0.0.1:9999`，不致命但仍属宿主耦合 |
+| `src/memory_capture.py` | **35 处**：扫 `~/.openclaw/agents/main/sessions/*.jsonl`、SQLite `transcript_events`、`session-sqlite-import-archive/`，并从 `openclaw.json` 取模型端点 | 主力源已是 pi 会话（三源之一），OpenClaw 两路仅用于历史归档回填；不迁走则 capture 会持续依赖旧宿主 |
+
+处置建议（未执行）：
+1. `memory_heartbeat_sentinel.py`：把通知抽成 `notify.py` 接口（`send(title, body)`），实现可选 Feishu/本地日志，OpenClaw 版本作为其中一种实现。
+2. `memory_capture.py`：拆成 `memory_capture.py`（只读 pi 会话）+ `migrate_openclaw_archive.py`（一次性历史回填，可安全删除）。
