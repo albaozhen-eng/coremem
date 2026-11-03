@@ -64,6 +64,30 @@ def _deployment_manifest(repo: Path):
 _DEPLOY_PATHS = _deployment_manifest(repo)
 FILES = [Path(p).name for p in _DEPLOY_PATHS if p.startswith("src/")]
 SH_FILES = [Path(p).name for p in _DEPLOY_PATHS if p.startswith("scripts/")]
+# profile 可以按机型排除不适用的部署文件（例如某机不用 coremem 自带 launcher）
+EXCLUDE = set()
+if args.profile:
+    _pf = repo / "deploy" / "profiles" / f"{args.profile}.json"
+    if _pf.exists():
+        EXCLUDE = set(json.loads(_pf.read_text()).get("exclude", []))
+    if EXCLUDE:
+        FILES = [n for n in FILES if n not in EXCLUDE]
+        SH_FILES = [n for n in SH_FILES if n not in EXCLUDE]
+        print(f"profile 排除: {', '.join(sorted(EXCLUDE))}")
+
+
+def _apply_patches(text: str) -> tuple:
+    """套用仓库默认补丁 + profile 替换（src/*.py 与 scripts/*.sh 一视同仁）。"""
+    n = m = 0
+    if not args.no_patch:
+        for pat, rep in PATCHES:
+            text, k = re.subn(pat, rep, text)
+            n += k
+    for old, new in profile_replacements.items():
+        text, k = re.subn(re.escape(old), new, text)
+        m += k
+    return text, n, m
+
 
 dest.mkdir(parents=True, exist_ok=True)
 report = []
@@ -73,15 +97,7 @@ for name in FILES:
         report.append(f"MISSING {name}")
         continue
     text = src.read_text(encoding="utf-8")
-    n = 0
-    if not args.no_patch:
-        for pat, rep in PATCHES:
-            text, k = re.subn(pat, rep, text)
-            n += k
-    m = 0
-    for old, new in profile_replacements.items():
-        text, k = re.subn(re.escape(old), new, text)
-        m += k
+    text, n, m = _apply_patches(text)
     if not args.check_drift:
         (dest / name).write_text(text, encoding="utf-8")
     extra = f" +{m} profile" if m else ""
@@ -99,10 +115,12 @@ for name in SH_FILES:
     if not sh.exists():
         report.append(f"MISSING {name}")
         continue
+    text, n, m = _apply_patches(sh.read_text(encoding="utf-8"))
     if not args.check_drift:
-        (dest / name).write_text(sh.read_text(encoding="utf-8"), encoding="utf-8")
+        (dest / name).write_text(text, encoding="utf-8")
         (dest / name).chmod(0o755)
-    report.append(f"{name}: copied")
+    extra = f" +{m} profile" if m else ""
+    report.append(f"{name}: {n} patches{extra} applied")
 
 # 2026-10-30 事故：生产热修没回仓库，一次 deploy 把 memory_recall 的行级 IDF、
 # 别名扩展、AUTO 退役守卫全部回退，检索自检当场变红。部署前先比对，默认拒绝。
@@ -114,7 +132,7 @@ if args.check_drift:
         live = dest / name
         if not src.exists() or not live.exists():
             continue
-        want = src.read_text(encoding="utf-8")
+        want, _n, _m = _apply_patches(src.read_text(encoding="utf-8"))
         have = live.read_text(encoding="utf-8")
         if want == have:
             continue
