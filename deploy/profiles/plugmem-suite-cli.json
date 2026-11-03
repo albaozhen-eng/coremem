@@ -1,7 +1,9 @@
 {
   "_comment": "plugmem-suite 独立部署机（~/.plugmem/workspace/memory, ~/.plugmem/data, scripts 在 ~/.plugmem/cli）",
   "_note": "替换按书写顺序生效：先带引号的多段拼接形式，后带斜杠的字面路径；最后是本机 omlx 端点/模型。",
-  "exclude": ["run-plugmem-suite.sh"],
+  "exclude": [
+    "run-plugmem-suite.sh"
+  ],
   "replacements": {
     "Path.home() / \".coremem\" / \"plugmem\" / \"config.json\"": "Path.home() / \".plugmem\" / \"config\" / \"plugmem.json\"",
     "Path.home() / \".coremem\" / \"vault\" / \"Memory\"": "Path.home() / \"memory-vault\"",
@@ -24,8 +26,6 @@
     ".coremem/backups": ".plugmem/backups",
     ".coremem/plugmem": ".plugmem/config",
     "\".openclaw\" / \"workspace-main\"": "\".plugmem\" / \"workspace\"",
-    "os.environ.get(\"MEM_DATA_DIR\", MEMORY_HOME / \"data\")": "os.environ.get(\"MEM_DATA_DIR\", Path.home() / \".plugmem\" / \"data\")",
-    "http://127.0.0.1:9999/v1": "http://127.0.0.1:18081/v1",
-    "Qwen3.8-Flash-Next-oQ4e-mtp": "Qwen3-8B-mlx-4bit"
+    "os.environ.get(\"MEM_DATA_DIR\", MEMORY_HOME / \"data\")": "os.environ.get(\"MEM_DATA_DIR\", Path.home() / \".plugmem\" / \"data\")"
   }
 }

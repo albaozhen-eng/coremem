@@ -458,18 +458,23 @@ def _build_llm_channels(default_timeout: int) -> list[dict]:
     # 通道 1：local-omlx-flash（本机 omlx，主力）。端点解析：policy.local_base →
     # coremem providers.omlx.baseUrl → 127.0.0.1:9999/v1。本地无 402/配额问题，
     # timeout 用调用方值（提取 90s / triage 30s 足够；实测提取 6000 字 <70s）。
+    # 2026-11-03：本机没有 omlx 的机器可关掉这条通道（providers.omlx.enabled=false 或
+    # MEM_OMLX_DISABLED=1），否则每轮要白等一次唤醒超时（实测 90s）才轮到云端通道。
+    _omlx_off = (str(os.environ.get("MEM_OMLX_DISABLED", "")).lower() in ("1", "true", "yes")
+                 or providers.get("omlx", {}).get("enabled") is False)
     local_base = (os.environ.get("MEM_OMLX_BASE_URL")
                   or policy.get("local_base") or policy.get("omlx_base")
                   or providers.get("omlx", {}).get("baseUrl")
                   or "http://127.0.0.1:9999/v1")
-    channels.append({
-        "name": "local-omlx-flash",
-        "url": local_base.rstrip("/") + "/chat/completions",
-        "base_url": local_base.rstrip("/"),
-        "model": os.environ.get("MEM_OMLX_MODEL") or policy.get("local_model") or "Qwen3.8-Flash-Next-oQ4e-mtp",
-        "key": os.environ.get("MEM_OMLX_API_KEY") or providers.get("omlx", {}).get("apiKey") or "omlx-local",
-        "timeout": max(int(default_timeout), 30),
-    })
+    if not _omlx_off:
+        channels.append({
+            "name": "local-omlx-flash",
+            "url": local_base.rstrip("/") + "/chat/completions",
+            "base_url": local_base.rstrip("/"),
+            "model": os.environ.get("MEM_OMLX_MODEL") or policy.get("local_model") or "Qwen3.8-Flash-Next-oQ4e-mtp",
+            "key": os.environ.get("MEM_OMLX_API_KEY") or providers.get("omlx", {}).get("apiKey") or "omlx-local",
+            "timeout": max(int(default_timeout), 30),
+        })
 
     # 通道 2/3/4（百炼 deepseek-v4-flash-0731 / scnet-tp / 百炼 qwen3.8-flash）
     # 2026-10-03 退役（Brian BA2 正式弃用百炼）：百炼自 09-28 起推理 4/4 全 403
@@ -512,15 +517,21 @@ def _build_llm_channels(default_timeout: int) -> list[dict]:
             "timeout": 240,
         })
 
-    # 通道 5（退役 2026-09-11）：deepseek-official —— HTTP 402 账户余额尽，
-    # 09-11 实证多轮「402 → 所有通道均失败」。充值前不再挂链（挂了也是每轮白打一次 402）。
-    # 恢复方式：充值后取消注释（key 优先 beeai env，其次 providers.deepseek）。
-    # ds_key = (cfg.get("mcp", {}).get("servers", {}).get("beeai", {}).get("env", {}).get("DEEPSEEK_API_KEY", "")
-    #           or providers.get("deepseek", {}).get("apiKey", ""))
-    # if ds_key:
-    #     channels.append({"name": "deepseek-official",
-    #                      "url": "https://api.deepseek.com/v1/chat/completions",
-    #                      "model": "deepseek-chat", "key": ds_key, "timeout": 120})
+    # 通道 5：DeepSeek 官网（2026-11-03 恢复挂链）。09-11 因 HTTP 402 余额尽拦掉，本次实测
+    # key 回包正常、deepseek-chat 可用，故改为配置驱动（providers.deepseek 或 DEEPSEEK_* env），
+    # 无需改代码即可开关；key 缺失时不建通道（不会每轮白撞一次 401）。
+    ds_cfg = providers.get("deepseek", {})
+    ds_key = os.environ.get("DEEPSEEK_API_KEY") or ds_cfg.get("apiKey", "")
+    ds_base = (os.environ.get("DEEPSEEK_BASE_URL") or ds_cfg.get("baseUrl", "")
+               or "https://api.deepseek.com/v1")
+    if ds_key:
+        channels.append({
+            "name": "deepseek-official",
+            "url": ds_base.rstrip("/") + "/chat/completions",
+            "model": os.environ.get("DEEPSEEK_MODEL") or ds_cfg.get("model", "") or "deepseek-chat",
+            "key": ds_key,
+            "timeout": 240,
+        })
 
     # 测试钩子（断网演练）：MEMORY_CAPTURE_SKIP_CHANNELS="local-omlx-flash" 跳过指定通道
     import os as _os
