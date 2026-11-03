@@ -56,7 +56,9 @@ FILES = ["plugmem_config.py", "remember.py", "memory_recall.py", "memory_write_b
          # 2026-11-02：从活体回灌仓库的孤儿脚本（此前只存在于 ~/.coremem/scripts）
          "golden_eval.py", "kis_eval.py", "memory_index.py", "plugmem_backup.py",
          # 2026-11-02 第 2 批：这两份仍保留对 ~/.openclaw 的活动依赖，见 DEPLOY.md
-         "memory_health.py", "memory_heartbeat_sentinel.py"]
+         "memory_health.py", "memory_heartbeat_sentinel.py",
+         # 2026-11-02 第 3 批：原样入库（仅加头部耦合注释），待拆分，见 DEPLOY.md
+         "memory_capture.py"]
 
 # 以 shell 脚本形式逐字节部署（不加 patch），像 secret_scan.py 一样直接复制。
 SH_FILES = ["plugmem-watchdog.sh", "run-plugmem-suite.sh"]

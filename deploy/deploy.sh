@@ -21,7 +21,7 @@ BAK="$DEST/.backup/coremem_predeploy_$STAMP"
 
 mkdir -p "$BAK"
 # 清单单一真源：与 deploy/patch_deploy.py 的 FILES + SH_FILES 保持一致（2026-11-02 统一）
-DEPLOY_FILES="plugmem_config.py remember.py memory_recall.py memory_write_buffer.py mo_common.py memory_insight_scan.py morning_briefing.py vault_export.py golden_eval.py kis_eval.py memory_index.py plugmem_backup.py memory_health.py memory_heartbeat_sentinel.py plugmem-watchdog.sh run-plugmem-suite.sh"
+DEPLOY_FILES="plugmem_config.py remember.py memory_recall.py memory_write_buffer.py mo_common.py memory_insight_scan.py morning_briefing.py vault_export.py golden_eval.py kis_eval.py memory_index.py plugmem_backup.py memory_health.py memory_heartbeat_sentinel.py memory_capture.py plugmem-watchdog.sh run-plugmem-suite.sh"
 for f in $DEPLOY_FILES; do
   [ -f "$DEST/$f" ] && cp -p "$DEST/$f" "$BAK/" || true
 done
