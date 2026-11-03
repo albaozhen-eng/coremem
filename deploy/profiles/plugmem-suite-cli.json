@@ -5,6 +5,7 @@
     "run-plugmem-suite.sh"
   ],
   "replacements": {
+    "(Path.home() / \".coremem/plugmem\")": "(Path.home() / \".plugmem/data\")",
     "Path.home() / \".coremem\" / \"plugmem\" / \"config.json\"": "Path.home() / \".plugmem\" / \"config\" / \"plugmem.json\"",
     "Path.home() / \".coremem\" / \"vault\" / \"Memory\"": "Path.home() / \"memory-vault\"",
     "os.environ.get(\"MEMORY_HOME\", Path.home() / \".openclaw\")": "os.environ.get(\"MEMORY_HOME\", Path.home() / \".plugmem\" / \"workspace\")",

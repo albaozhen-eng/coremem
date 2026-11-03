@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-SRC = Path.home() / ".coremem/plugmem"
+SRC = Path(os.environ.get("MEM_PLUGMEM_DATA") or (Path.home() / ".coremem/plugmem"))
 DEST = Path.home() / ".coremem/backups/plugmem"
 KEEP = 7
 STAMP = datetime.now().strftime("%Y-%m-%d")
