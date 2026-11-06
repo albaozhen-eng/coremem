@@ -44,6 +44,7 @@ MEM_WS = HOME / ".coremem/logs"
 MEM_MAIN = HOME / ".coremem/memory"
 CAPTURE_LOG = MEM_WS / "memory_capture_30m.log"          # 调度活性信号源
 FACTS = MEM_MAIN / "unified-facts.jsonl"                  # 管道产能信号源（remember.py 实际落库处）
+PI_SESSIONS = HOME / ".pi" / "agent" / "sessions"          # 输入信号源（capture 实际扫描处）
 STATE_F = MEM_WS / "heartbeat-sentinel-state.json"
 
 SCHED_STALE_MIN = 90          # 30min 调度，留 3 倍余量
@@ -147,9 +148,55 @@ def fact_age_h():
         return None
 
 
+def active_session_count(since_epoch: float) -> int:
+    """自某时刻之后被修改过的会话文件数（= 那之后有没有新的输入）。
+
+    2026-11-06 加：用来区分「没有输入」和「管道坏了」。
+    原先只凭 unified-facts 的 mtime 判红，于是 56 小时没人跟 agent 说话
+    也会报「产能断供：LLM 全通道死/embedding 死」—— 三个假设全是故障，
+    唯独漏掉最可能的一种：没人提问，本就没有事实可提取。
+
+    判据用「最后一条事实的时间」而不是「最近 N 小时」：
+    后者会被"刚刚才开始的新会话"误判成有输入（本次就踩到了）。
+    """
+    cutoff = since_epoch
+    n = 0
+    try:
+        for f in PI_SESSIONS.glob("*/*.jsonl"):
+            try:
+                if f.stat().st_mtime >= cutoff:
+                    n += 1
+            except OSError:
+                continue
+    except OSError:
+        return -1          # 扫不了 ≠ 没有输入
+    return n
+
+
+def fact_last_ts():
+    """最后一条事实的时间戳（tz-aware）。读不到→None。"""
+    try:
+        last = None
+        with FACTS.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    last = line
+        if not last:
+            return None
+        ts = json.loads(last).get("timestamp")
+        if not ts:
+            return None
+        dt = datetime.fromisoformat(ts)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
 def check():
     """返回 [(reason, detail)] 需要告警的 stale 项；空列表=健康。"""
     problems = []
+    idle_note = None
     sa = sched_age_min()
     fa = fact_age_h()
     if sa is None:
@@ -159,7 +206,20 @@ def check():
     if fa is None:
         problems.append(("fact_missing", f"unified-facts 读不到（{FACTS}）— 事实池丢失/空"))
     elif fa > FACT_STALE_H:
-        problems.append(("fact_stale", f"产能断供：unified-facts 最后一条事实已 {fa:.1f}h 前（阈值 {FACT_STALE_H}h）— 调度或许在跑但扫不到源/LLM 全通道死/embedding 死"))
+        # 关键区分：这段时间有没有输入？
+        lts = fact_last_ts()
+        since = lts.timestamp() if lts else (time.time() - FACT_STALE_H * 3600)
+        nsess = active_session_count(since)
+        if nsess == 0:
+            # 最后一条事实之后没有任何新会话 = 没有可提取的内容。不是故障。
+            idle_note = (f"无输入：最后一条事实（{fa:.1f}h 前）之后没有任何会话活动，"
+                         f"产能停滞属正常，非故障")
+        elif nsess < 0:
+            problems.append(("fact_stale", f"产能断供：最后一条事实 {fa:.1f}h 前，且无法扫描会话目录（{PI_SESSIONS}）"))
+        else:
+            problems.append(("fact_stale",
+                             f"产能断供：最后一条事实 {fa:.1f}h 前（阈值 {FACT_STALE_H}h），"
+                             f"但此后有 {nsess} 个会话活动却没产出事实 —— 是真断供，查 capture 提取链路/LLM 通道"))
     # ③ LLM 本地服务体检（2026-09-11 通道修复）：omlx + PlugMem 双端点
     omlx_base = omlx_base_url()
     ok, detail = _probe(omlx_base + "/models")
@@ -170,7 +230,7 @@ def check():
         problems.append(("plugmem_down", f"PlugMem 挂：{PLUGMEM_HEALTH} 探活失败（{detail}）— 事实写入将落 buffer，召回不可用"))
     elif '"status": "ok"' not in detail and '"status":"ok"' not in detail:
         problems.append(("plugmem_degraded", f"PlugMem 降级：health 返回非 ok（{detail}）"))
-    return problems, sa, fa
+    return problems, sa, fa, idle_note
 
 
 def should_alert(st, reason):
@@ -190,7 +250,7 @@ def main():
         log(f"--test 飞书自检 {'✅ 送达' if ok else '🔴 失败'}")
         return 0 if ok else 1
 
-    problems, sa, fa = check()
+    problems, sa, fa, idle_note = check()
     sched_s = "n/a" if sa is None else f"{sa:.0f}min"
     fact_s = "n/a" if fa is None else f"{fa:.1f}h"
     svc_bad = {r for r, _ in problems if r in ("omlx_down", "plugmem_down", "plugmem_degraded")}
