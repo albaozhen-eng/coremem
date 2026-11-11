@@ -70,6 +70,7 @@ with tempfile.TemporaryDirectory() as td:
     heartbeat.FACTS = root / "facts.jsonl"
     # check() 现在返回 4 元组（第四项 idle_note：「无输入」不是故障的说明），
     # 桩必须同步，否则 main() 解包直接 ValueError。
+    _check_real = heartbeat.check
     heartbeat.check = lambda: ([("test_down", "test outage")], None, None, None)
     with patch.object(sys, "argv", ["memory_heartbeat_sentinel.py"]):
         with patch.object(heartbeat.notify, "send", return_value=False):
@@ -82,6 +83,39 @@ with tempfile.TemporaryDirectory() as td:
         state = heartbeat.load_state()
         check("发送成功才记去重时间", "test_down" in state.get("alerts", {}))
         check("成功后进入去重窗口", not heartbeat.should_alert(state, "test_down"))
+    heartbeat.check = _check_real   # 还原：下面的 check() 语义测试要用真实现
+
+# 本机没有 omlx（providers.omlx.enabled=false）时，哨兵不得每轮报假 omlx_down；
+# 真故障判据改为「capture 通道链为空」。2026-11-11 加：通道配置化后这条是新的守门语义。
+def _probe_ok(url, *a, **k):
+    return True, '{"status":"ok"}'
+
+with patch.object(heartbeat, "_providers_map", return_value={"omlx": {"enabled": False}}), \
+     patch.object(heartbeat, "capture_channel_names", return_value=["bailian:qwen3.8-flash", "deepseek-official"]), \
+     patch.object(heartbeat, "_probe", _probe_ok), \
+     patch.object(heartbeat, "sched_age_min", return_value=10.0), \
+     patch.object(heartbeat, "fact_age_h", return_value=1.0):
+    problems, _sa, _fa, _note = heartbeat.check()
+    reasons = [r for r, _ in problems]
+    check("关闭 omlx 的机器不报假 omlx_down", "omlx_down" not in reasons, str(reasons))
+    check("通道链非空时不报 no_llm_channel", "no_llm_channel" not in reasons, str(reasons))
+
+with patch.object(heartbeat, "_providers_map", return_value={"omlx": {"enabled": False}}), \
+     patch.object(heartbeat, "capture_channel_names", return_value=[]), \
+     patch.object(heartbeat, "_probe", _probe_ok), \
+     patch.object(heartbeat, "sched_age_min", return_value=10.0), \
+     patch.object(heartbeat, "fact_age_h", return_value=1.0):
+    problems, _sa, _fa, _note = heartbeat.check()
+    reasons = [r for r, _ in problems]
+    check("通道链为空要报 no_llm_channel", "no_llm_channel" in reasons, str(reasons))
+
+with patch.object(heartbeat, "_providers_map", return_value={}), \
+     patch.object(heartbeat, "_probe", lambda url, *a, **k: (False, "Connection refused")), \
+     patch.object(heartbeat, "sched_age_min", return_value=10.0), \
+     patch.object(heartbeat, "fact_age_h", return_value=1.0):
+    problems, _sa, _fa, _note = heartbeat.check()
+    reasons = [r for r, _ in problems]
+    check("未关闭 omlx 时仍探本地服务", "omlx_down" in reasons, str(reasons))
 
 print("\n全部通过" if not FAILS else f"\n失败: {FAILS}")
 sys.exit(1 if FAILS else 0)

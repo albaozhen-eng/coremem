@@ -55,6 +55,24 @@ PLUGMEM_HEALTH = "http://127.0.0.1:8089/api/v1/health"   # PlugMem 服务端点
 SVC_PROBE_TIMEOUT = 5         # 本地端点探活超时（秒）
 
 
+def _providers_map() -> dict:
+    """与 memory_capture 同源：读 coremem 自有 providers 配置（env > ~/.coremem/config/providers.json）。"""
+    path = Path(os.environ.get("MEM_PROVIDERS_CONFIG", str(HOME / ".coremem/config/providers.json")))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return (raw.get("models", {}).get("providers", {}) or raw.get("providers", {}) or {})
+
+
+def omlx_disabled() -> bool:
+    """本机没有（或不想要）本地 omlx：capture 里也是这两条开关。
+    没关时哨兵会每轮报一条假告警「omlx_down」——机器本来就没装 omlx，不是故障。"""
+    if str(os.environ.get("MEM_OMLX_DISABLED", "")).lower() in ("1", "true", "yes"):
+        return True
+    return _providers_map().get("omlx", {}).get("enabled") is False
+
+
 def omlx_base_url() -> str:
     """Resolve the same local endpoint as capture, without OpenClaw config."""
     env_base = os.environ.get("MEM_OMLX_BASE_URL")
@@ -193,6 +211,15 @@ def fact_last_ts():
         return None
 
 
+def capture_channel_names():
+    """问 memory_capture 要当前通道链；导入失败返回 None（未知，不当成空链告警）。"""
+    try:
+        import memory_capture as mc
+        return [c["name"] for c in mc._build_llm_channels(30)]
+    except Exception:
+        return None
+
+
 def check():
     """返回 [(reason, detail)] 需要告警的 stale 项；空列表=健康。"""
     problems = []
@@ -220,11 +247,20 @@ def check():
             problems.append(("fact_stale",
                              f"产能断供：最后一条事实 {fa:.1f}h 前（阈值 {FACT_STALE_H}h），"
                              f"但此后有 {nsess} 个会话活动却没产出事实 —— 是真断供，查 capture 提取链路/LLM 通道"))
-    # ③ LLM 本地服务体检（2026-09-11 通道修复）：omlx + PlugMem 双端点
-    omlx_base = omlx_base_url()
-    ok, detail = _probe(omlx_base + "/models")
-    if not ok:
-        problems.append(("omlx_down", f"本地 LLM omlx 挂：{omlx_base}/models 探活失败（{detail}）— memory_capture 主力通道不可用；当前无云端备胎时提取会失败并留待下轮"))
+    # ③ LLM 服务体检（2026-09-11 通道修复；2026-11-11 跟随通道配置化）
+    #    本地 omlx 被显式关闭的机器不探它（否则每轮一条假 omlx_down），改为直接看
+    #    capture 能不能建出通道——链空才是真故障（提取会全链失败、事实永不落地）。
+    if omlx_disabled():
+        names = capture_channel_names()
+        if names is not None and not names:
+            problems.append(("no_llm_channel",
+                             "capture 通道链为空：providers.json 里没有任何带 key 的可用通道，"
+                             "提取将全链失败（事实留待下轮重试，但永远不会长记忆）"))
+    else:
+        omlx_base = omlx_base_url()
+        ok, detail = _probe(omlx_base + "/models")
+        if not ok:
+            problems.append(("omlx_down", f"本地 LLM omlx 挂：{omlx_base}/models 探活失败（{detail}）— memory_capture 主力通道不可用；无云端备胎时提取会失败并留待下轮"))
     ok, detail = _probe(PLUGMEM_HEALTH)
     if not ok:
         problems.append(("plugmem_down", f"PlugMem 挂：{PLUGMEM_HEALTH} 探活失败（{detail}）— 事实写入将落 buffer，召回不可用"))
