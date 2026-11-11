@@ -2,7 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-11-03
+## [Unreleased] - 2026-11-11
+
+### Added
+- MCP server纳入仓库（`mcp/`）+ 可选安装器 `deploy/install-mcp.sh` + 接口回归 `test-mcp-fix.mjs`；路径支持 PLUGMEM_CLI_DIR / PLUGMEM_CONFIG_FILE 覆盖。
+- golden-gate 周更门禁任务（周一 5:30，`golden_eval.py --gate v2`）。
+
+### Changed
+- 备份扩容：除 data 外新增 workspace（L1 SoT/事实池/MEMORY.md）与 config；快照目录 chmod 700；git bundle 补上 coremem 仓库（原 memory-ops 路径不存在时不再静默空跑）。
+- nightly 改跑 memory_index.py（AUTO 同步已退役，旧行为需 MEM_NIGHTLY=insight-scan）。
+
+### Fixed
+- health RED/YELLOW 接飞书告警（notify，MEM_HEALTH_NOTIFY=0 可关），不再只写盘无人知晓。
+- MCP 接口漂移：memory_contradictions 改调 mem_crystallize.py scan-contradictions；memory_trends 改为直连 PlugMem API 统计近 N 天 tag 词频（不再依赖已删的 CLI 参数）。
+
+## [Previous] - 2026-11-03
 
 ### Changed
 - Daily capture defaults to pi sessions only; OpenClaw history is an explicit read-only source with a one-shot backfill entry point.

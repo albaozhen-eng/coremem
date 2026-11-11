@@ -113,6 +113,11 @@ def scan_file(filepath: Path) -> list[dict]:
             match_lower = matched_text.lower()
             
             # 允许列表过滤
+            if pattern_name == "API Key":
+                # 运行时插值/拼接（如 X-API-Key: ${key} 或 "X-API-Key: " + key）是代码不是凭据；
+                # 真密钥（sk- 长字面量/引号内长字面量）不含这些标记，仍会被拦。
+                if "${" in matched_text or '" +' in matched_text or "' +" in matched_text:
+                    continue
             if pattern_name == "Private Domain":
                 if match_lower in ALLOWLIST_DOMAINS or match_lower.rstrip('.') in ALLOWLIST_DOMAINS:
                     continue

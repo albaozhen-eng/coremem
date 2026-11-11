@@ -1,0 +1,11 @@
+{
+  "name": "plugmem-mcp",
+  "version": "1.1.0",
+  "description": "PlugMem memory MCP server (bridges coremem CLI + local PlugMem service)",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  }
+}

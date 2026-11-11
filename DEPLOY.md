@@ -5,7 +5,7 @@
 ```bash
 git clone https://github.com/albaozhen-eng/coremem && cd coremem
 bash deploy/install.sh --deepseek-key sk-xxx     # 云端通道；本机有 omlx 用 --local-model
-python3 deploy/scheduler.py status               # 6 个定时任务应全部在列
+python3 deploy/scheduler.py status               # 7 个定时任务应全部在列
 ```
 
 它把下面"新机器三步"的内容全包了，并且**不需要任何路径替换**——默认布局就是
@@ -19,6 +19,15 @@ python3 deploy/scheduler.py status               # 6 个定时任务应全部在
 
 调度器也可以单独装卸：`python3 deploy/scheduler.py install|status|uninstall`
 （macOS 走 launchd，Linux 走用户 crontab）。
+
+### MCP server（可选，pi 等 MCP 客户端用）
+
+```bash
+bash deploy/install-mcp.sh            # 装到 ~/.plugmem/mcp，含依赖安装+接口回归
+```
+
+MCP 与 CLI 同仓库同源（`mcp/`）。**每次 deploy.sh 升级 CLI 后跑一遍回归**，
+防接口漂移：`node ~/.plugmem/mcp/test-mcp-fix.mjs`。详见 `mcp/README.md`。
 
 ## 模型
 - **仓库（GitHub）= 唯一正统源**：平台无关，无隐私信息，可在任何电脑 `git pull`。
