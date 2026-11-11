@@ -121,6 +121,12 @@ def scan_file(filepath: Path) -> list[dict]:
             if pattern_name == "Private Domain":
                 if match_lower in ALLOWLIST_DOMAINS or match_lower.rstrip('.') in ALLOWLIST_DOMAINS:
                     continue
+                # 2026-11-11：`.today` 等既是顶级域也是常见方法名，
+                # 于是 date.today() 被当成私有域名。域名后紧跟 "(" 的是方法调用，不是域名。
+                # 只按这一个特征放行，不削弱对字符串/URL 里真域名的检出。
+                _after = content[match.end():match.end() + 1]
+                if _after == "(":
+                    continue
             if pattern_name == "IPv4":
                 if matched_text in ALLOWLIST_IPS:
                     continue
