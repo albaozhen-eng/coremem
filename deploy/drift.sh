@@ -35,7 +35,13 @@ done
 
 for f in "$LIVE"/*.py; do
     b="$(basename "$f")"
-    [ -f "$REPO/src/$b" ] || { echo "  ⊘ 仅活体: $b"; drift=$((drift+1)); }
+    # 仓库里同名文件可能放在 src/ 或 scripts/（secret_scan 就在 scripts/），
+    # 只看 src/ 会把它误报成"仅活体"。两处都找。
+    if [ ! -f "$REPO/src/$b" ] && [ ! -f "$REPO/scripts/$b" ]; then
+        echo "  ⊘ 仅活体: $b"; drift=$((drift+1))
+    elif [ ! -f "$REPO/src/$b" ] && ! diff -q "$REPO/scripts/$b" "$f" >/dev/null 2>&1; then
+        echo "  ⚠ 分叉: $b (仓库 scripts/)"; drift=$((drift+1))
+    fi
 done
 
 echo
