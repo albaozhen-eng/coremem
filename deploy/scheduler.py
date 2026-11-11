@@ -61,6 +61,10 @@ def _jobs():
         # （新鲜度阈 192h/336h）有持续产物；需要 golden/golden-v0.json + 已 accept 基线。
         ("golden-gate", ["golden_eval.py", "--gate", "v2"], None,
          {"Hour": 5, "Minute": 30, "Weekday": 1}, f"{LABEL_PREFIX}.golden-gate.log"),
+        # 2026-11-11 审计 P1：检索引用频次每日入账（S3），让 scores.json 持续累积，
+        # 检索侧 score-rerank 不再因冷启动恒 false。显式评分（memory_rate）仍走同一 ledger。
+        ("feedback-ingest", ["mem_feedback.py", "ingest-recalls"], None,
+         {"Hour": 6, "Minute": 0}, f"{LABEL_PREFIX}.feedback-ingest.log"),
     ]
 
 
