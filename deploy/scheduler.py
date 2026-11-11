@@ -35,15 +35,36 @@ from pathlib import Path
 LABEL_PREFIX = "com.coremem"
 
 # (name, argv, interval_seconds | None, calendar {"Hour":h,"Minute":m} | None, stdout_name)
-JOBS = [
-    ("capture", ["memory_capture.py", "--hours", "1"], 1800, None, "memory_capture_30m.log"),
-    ("buffer-flush", ["memory_write_buffer.py", "flush"], 3600, None, f"{LABEL_PREFIX}.buffer-flush.log"),
-    ("briefing", ["morning_briefing.py"], None, {"Hour": 8, "Minute": 0}, f"{LABEL_PREFIX}.briefing.log"),
-    ("nightly", ["memory_insight_scan.py", "--sync-compiled-truth"], None,
-     {"Hour": 3, "Minute": 0}, f"{LABEL_PREFIX}.nightly.log"),
-    ("health", ["memory_health.py"], None, {"Hour": 9, "Minute": 0}, f"{LABEL_PREFIX}.health.log"),
-    ("backup", ["plugmem_backup.py"], None, {"Hour": 4, "Minute": 0}, f"{LABEL_PREFIX}.backup.log"),
-]
+def _jobs():
+    """任务表（改夜间任务用途见下）。"""
+    import os
+    # 夜间：给统一事实池建 FTS5 增量索引（让 L1 可召回）。
+    # 这里曾经跑 memory_insight_scan --sync-compiled-truth，但该功能 2026-10-19 已显式退役
+    # （AUTO 区块不再写 MEMORY.md）：每天只打印退役提示并非零退出，是噪声不是工作。
+    # 确需恢复旧行为：MEM_NIGHTLY=insight-scan（还需 MEMORY_AUTO_ENABLE=1）。
+    nightly_args = (["memory_insight_scan.py", "--sync-compiled-truth"]
+                    if os.environ.get("MEM_NIGHTLY") == "insight-scan"
+                    else ["memory_index.py"])
+    return [
+        ("capture", ["memory_capture.py", "--hours", "1"], 1800, None, "memory_capture_30m.log"),
+        ("buffer-flush", ["memory_write_buffer.py", "flush"], 3600, None,
+         f"{LABEL_PREFIX}.buffer-flush.log"),
+        ("briefing", ["morning_briefing.py"], None, {"Hour": 8, "Minute": 0},
+         f"{LABEL_PREFIX}.briefing.log"),
+        ("nightly", nightly_args, None, {"Hour": 3, "Minute": 0},
+         f"{LABEL_PREFIX}.nightly.log"),
+        ("health", ["memory_health.py"], None, {"Hour": 9, "Minute": 0},
+         f"{LABEL_PREFIX}.health.log"),
+        ("backup", ["plugmem_backup.py"], None, {"Hour": 4, "Minute": 0},
+         f"{LABEL_PREFIX}.backup.log"),
+        # 2026-11-11 审计 P0-3：golden 门禁周更（周一 5:30），让 health 的 eval 探针
+        # （新鲜度阈 192h/336h）有持续产物；需要 golden/golden-v0.json + 已 accept 基线。
+        ("golden-gate", ["golden_eval.py", "--gate", "v2"], None,
+         {"Hour": 5, "Minute": 30, "Weekday": 1}, f"{LABEL_PREFIX}.golden-gate.log"),
+    ]
+
+
+JOBS = _jobs()
 
 
 def pick_python(explicit: str | None) -> str:
