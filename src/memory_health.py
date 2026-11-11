@@ -896,7 +896,9 @@ def main():
         ("provenance", probe_provenance), ("sot_guard", probe_sot_guard),
         ("write_fidelity", probe_write_fidelity), ("kis", probe_kis),
         ("anchor_drift", probe_anchor_drift), ("dup_guard", probe_dup_guard),
-        ("cost", probe_cost),
+        # 2026-11-11 审计 P2：cost 探针移除——recall_decisions.jsonl 无任何写入方，
+        # 检索链路纯确定性零 LLM，探针不度量任何东西（假绿）。函数保留，
+        # 将来若引入 LLM 检索再挂回。
         ("retrieval", probe_retrieval),
         ("l2_recall", probe_l2_recall),
     ]

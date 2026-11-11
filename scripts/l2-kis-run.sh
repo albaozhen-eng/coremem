@@ -1,0 +1,25 @@
+#!/bin/bash
+# 每月跑一次 L2 已知项评测，产出 golden/reports/l2kis-<ts>.json。
+# 为什么需要：memory_health 的 l2_recall 探针 >8 天无新报告即判黄。
+# 2026-11-11 之前没有任何调度器生产它，于是探针盯着一份 16 天前的文件永远黄。
+# 2026-11-11 审计 P2：路径参数化（默认 ~/.coremem 布局，plugmem 机器用环境变量覆盖），
+#   python 优先 homebrew（/usr/bin/python3 是 3.9，跑不了新语法）；收编进 scheduler.py 月更。
+set -uo pipefail
+S="${MEM_SCRIPTS_DIR:-$HOME/.coremem/scripts}"
+H="${MEM_HEALTH_DIR:-$HOME/.coremem/health}"
+R="${MEM_GOLDEN_REPORTS:-$HOME/.coremem/memory/golden/reports}"
+LOG="${MEM_LOGS_DIR:-$HOME/.coremem/logs}/l2-kis.log"; HB="$H/l2-kis.heartbeat"
+PY="${MEM_PYTHON:-}"
+if [ -z "$PY" ]; then
+  for cand in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+    [ -x "$cand" ] && PY="$cand" && break
+  done
+fi
+mkdir -p "$H" "$R" "$(dirname "$LOG")"
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+printf '%s started\n' "$(ts)" > "$HB"
+"$PY" "$S/l2_kis.py" --n 200 --out "$R/l2kis-$(date +%Y%m%d-%H%M).json" >>"$LOG" 2>&1
+RC=$?
+printf '%s rc=%s\n' "$(ts)" "$RC" > "$HB"
+echo "[$(ts)] rc=$RC" >>"$LOG"
+exit $RC

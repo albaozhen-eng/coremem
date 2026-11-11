@@ -20,3 +20,6 @@ src/notify.py
 src/migrate_openclaw_archive.py
 scripts/plugmem-watchdog.sh
 scripts/run-plugmem-suite.sh
+src/l2_kis.py
+src/l1_prov_index.py
+scripts/l2-kis-run.sh

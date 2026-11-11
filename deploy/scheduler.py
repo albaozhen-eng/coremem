@@ -65,7 +65,18 @@ def _jobs():
         # 检索侧 score-rerank 不再因冷启动恒 false。显式评分（memory_rate）仍走同一 ledger。
         ("feedback-ingest", ["mem_feedback.py", "ingest-recalls"], None,
          {"Hour": 6, "Minute": 0}, f"{LABEL_PREFIX}.feedback-ingest.log"),
+        # 2026-11-11 审计 P2：L2 已知项评测月更（每月 1 日 5:00）。
+        # 此前 l2_recall 探针有、生产者无（另一台机器手工装过 launchd，现收编进调度器）。
+        ("l2-kis", ["l2-kis-run.sh"], None,
+         {"Day": 1, "Hour": 5, "Minute": 0}, f"{LABEL_PREFIX}.l2-kis.log"),
     ]
+
+
+def _prog(python: str, argv: list) -> list:
+    """.sh 任务用 bash 跑，其余用 python。"""
+    if argv and argv[0].endswith(".sh"):
+        return ["/bin/bash", *argv]
+    return [python, *argv]
 
 
 JOBS = _jobs()
@@ -103,7 +114,7 @@ def macos_install(prefix: Path, logs: Path, python: str, dry: bool) -> int:
         label = f"{LABEL_PREFIX}.{name}"
         d = {
             "Label": label,
-            "ProgramArguments": [python, *argv],
+            "ProgramArguments": _prog(python, argv),
             "WorkingDirectory": str(prefix),
             "EnvironmentVariables": env,
             "StandardOutPath": str(logs / out_name),
@@ -136,11 +147,14 @@ def linux_install(prefix: Path, logs: Path, python: str, dry: bool) -> int:
     lines = ["# >>> coremem scheduler (deploy/scheduler.py) >>>",
              f"# scripts={prefix} logs={logs}"]
     for name, argv, interval, cal, out_name in JOBS:
-        cmd = f"cd {prefix} && {python} {' '.join(argv)} >> {logs / out_name} 2>&1"
+        prog = " ".join(_prog(python, argv))
+        cmd = f"cd {prefix} && {prog} >> {logs / out_name} 2>&1"
         if interval:
             lines.append(f"*/{interval // 60} * * * * {cmd}")
         else:
-            lines.append(f"{cal['Minute']} {cal['Hour']} * * * {cmd}")
+            dom = cal.get("Day", "*")
+            dow = cal.get("Weekday", "*")
+            lines.append(f"{cal['Minute']} {cal['Hour']} {dom} * {dow} {cmd}")
     lines.append("# <<< coremem scheduler <<<")
     block = "\n".join(lines)
     if dry:
