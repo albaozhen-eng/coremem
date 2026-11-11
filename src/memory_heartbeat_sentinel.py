@@ -290,7 +290,14 @@ def main():
     sched_s = "n/a" if sa is None else f"{sa:.0f}min"
     fact_s = "n/a" if fa is None else f"{fa:.1f}h"
     svc_bad = {r for r, _ in problems if r in ("omlx_down", "plugmem_down", "plugmem_degraded")}
-    svc_s = "omlx✅/plugmem✅" if not svc_bad else "/".join(sorted(svc_bad))
+    # 摘要里别说谎：本机 omlx 被显式关闭时，"omlx✅" 是假的（它根本没在跑）。
+    if svc_bad:
+        svc_s = "/".join(sorted(svc_bad))
+    elif omlx_disabled():
+        n = len(capture_channel_names() or [])
+        svc_s = f"云端×{n}/plugmem✅" if n else "无LLM通道/plugmem✅"
+    else:
+        svc_s = "omlx✅/plugmem✅"
 
     if mode == "--status":
         log(f"--status 调度活性={sched_s}（阈 {SCHED_STALE_MIN}min）｜产能={fact_s}（阈 {FACT_STALE_H}h）｜服务={svc_s}｜问题={len(problems)}")
