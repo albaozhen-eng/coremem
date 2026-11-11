@@ -22,6 +22,18 @@ DEST = Path.home() / ".coremem/backups/plugmem"
 KEEP = 7
 STAMP = datetime.now().strftime("%Y-%m-%d")
 
+# 2026-11-11 审计 P0-1：L1 每日笔记（SoT）、统一事实池、MEMORY.md、配置此前不在备份范围。
+# 规范路径用 .coremem 形式书写，由部署 profile 改写（plugmem-suite-cli → .plugmem）。
+# 不存在的源自动跳过；可用 MEM_BACKUP_EXTRA="name:path,name:path" 追加。
+EXTRA_SOURCES = [
+    ("workspace", Path(os.environ.get("MEM_BACKUP_WORKSPACE") or Path.home() / ".coremem" / "memory")),
+    ("config", Path(os.environ.get("MEM_BACKUP_CONFIG") or Path.home() / ".coremem/config")),
+]
+for _spec in os.environ.get("MEM_BACKUP_EXTRA", "").split(","):
+    if ":" in _spec:
+        _name, _p = _spec.split(":", 1)
+        EXTRA_SOURCES.append((_name.strip(), Path(_p.strip()).expanduser()))
+
 
 def run(cmd: list[str]) -> int:
     return subprocess.run(cmd, capture_output=True, text=True).returncode
@@ -42,6 +54,7 @@ def main() -> int:
         return 1
     target = DEST / STAMP
     target.mkdir(parents=True, exist_ok=True)
+    target.chmod(0o700)  # 备份含明文 key（config），目录收紧到仅本人可读
 
     t0 = time.time()
     rc = run(["rsync", "-a", "--delete",
@@ -59,23 +72,48 @@ def main() -> int:
         with sqlite3.connect(f"file:{live}?mode=ro", uri=True) as src_con, sqlite3.connect(dst) as dst_con:
             src_con.backup(dst_con)
 
+    # 额外源：workspace（L1/facts/MEMORY.md）与 config。不用 --delete：
+    # 误删不会立刻传导进快照，7 天滚动内仍可找回。
+    backed_extras = {}
+    for name, src in EXTRA_SOURCES:
+        if not src.exists():
+            continue
+        dst = target / name
+        dst.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            rc2 = run(["rsync", "-a", f"{src}/", f"{dst}/"])
+        else:
+            rc2 = run(["rsync", "-a", str(src), str(dst)])
+        backed_extras[name] = {"source": str(src), "ok": rc2 == 0}
+        if rc2 != 0:
+            print(f"⚠️ 额外源 {name} rsync 失败 rc={rc2}（{src}）")
+
     size = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
     (target / "snapshot.json").write_text(json.dumps(
         {"created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-         "bytes": size, "source": str(SRC)}, ensure_ascii=False, indent=1) + "\n")
-    # 顺带把代码仓库打成 git bundle（异地副本用）
+         "bytes": size, "source": str(SRC), "extras": backed_extras}, ensure_ascii=False, indent=1) + "\n")
+    # 顺带把代码仓库打成 git bundle（异地副本用）。
+    # 2026-11-11 审计：原来只找 ~/projects/memory-ops*（本机不存在，每天静默空跑），
+    # 补上真正在用的 ~/coremem；全部缺失时明确报告而非静默。
     repo_dir = Path.home() / "backups" / "repos"
     repo_dir.mkdir(parents=True, exist_ok=True)
-    for repo in ("memory-ops", "memory-ops-os"):
-        src = Path.home() / "projects" / repo
+    bundled = []
+    for src in [Path.home() / "coremem",
+                Path.home() / "projects" / "memory-ops",
+                Path.home() / "projects" / "memory-ops-os"]:
         if (src / ".git").exists():
-            run(["git", "-C", str(src), "bundle", "create",
-                 str(repo_dir / f"{repo}-{STAMP}.bundle"), "--all"])
+            if run(["git", "-C", str(src), "bundle", "create",
+                    str(repo_dir / f"{src.name}-{STAMP}.bundle"), "--all"]) == 0:
+                bundled.append(src.name)
+    if not bundled:
+        print("⚠️ 无可打包的代码仓库（coremem/memory-ops 均不存在）")
     for old in sorted(repo_dir.glob("*.bundle"))[:-14]:
         old.unlink(missing_ok=True)
 
     removed = prune()
     print(f"L2 快照完成：{target} | {size / 1024**3:.2f} GB | {time.time() - t0:.1f}s"
+          + (f" | 额外源 {','.join(backed_extras)}" if backed_extras else " | ⚠️ 无额外源")
+          + (f" | bundle {','.join(bundled)}" if bundled else "")
           + (f" | 清理 {', '.join(removed)}" if removed else ""))
     return 0
 

@@ -918,6 +918,22 @@ def main():
         "line": line,
         "checks": checks,
     }
+    # 2026-11-11 审计 P0-3：RED/YELLOW 必须告警，不能只写盘。
+    # health 每日 9:00 跑一次 → 每天至多一条，无需额外去重。
+    # 开关：MEM_HEALTH_NOTIFY=0 关闭；notify 配置缺失/发送失败只降级记录，不拖垮看板。
+    alert = "skipped"
+    if overall != "green":
+        if os.environ.get("MEM_HEALTH_NOTIFY", "1") == "0":
+            alert = "disabled"
+        else:
+            try:
+                import notify
+                ok = notify.send(line, title=f"记忆系统 {overall.upper()}")
+                alert = "sent" if ok else "api_rejected"
+            except Exception as e:  # noqa: BLE001
+                alert = f"failed: {e}"[:200]
+                print(f"[health] 告警发送失败：{e}", file=sys.stderr)
+    payload["alert"] = alert
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     tmp = OUT.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
