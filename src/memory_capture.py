@@ -705,6 +705,32 @@ def extract_facts_via_llm(conversation: str) -> list[str]:
 extract_via_openclaw = extract_facts_via_llm
 
 
+# 2026-11-11 审计：凭据闸门。回填时 LLM 把宝塔面板密码当事实写进了记忆（事后三层清除）。
+# 教训：不能指望 LLM 自觉——在事实写入前做确定性脱敏，保留事实骨架、只抹凭据值。
+CRED_VALUE = re.compile(
+    r"((?:密码|口令|password|passwd|pwd)\s*(?:为|是|[:：=])\s*)([^\s，。;,]{4,})", re.IGNORECASE)
+CRED_SK = re.compile(r"\bsk-[A-Za-z0-9_\-\.]{16,}")
+CRED_KV = re.compile(
+    r"((?:api[_-]?key|access[_-]?token|secret)\s*[:：=]\s*['\"]?)([A-Za-z0-9_\-\.]{12,})", re.IGNORECASE)
+
+
+def redact_credentials(text: str) -> tuple[str, bool]:
+    """返回 (脱敏后文本, 是否发生脱敏)。只抹凭据值，保留前缀便于追溯。"""
+    redacted = False
+
+    def _keep_prefix(m):
+        nonlocal redacted
+        redacted = True
+        return m.group(1) + "[已脱敏]"
+
+    text = CRED_VALUE.sub(_keep_prefix, text)
+    text = CRED_KV.sub(_keep_prefix, text)
+    if CRED_SK.search(text):
+        redacted = True
+        text = CRED_SK.sub("[已脱敏]", text)
+    return text, redacted
+
+
 def get_bailian_api_key() -> str:
     """兼容旧调用方；百炼已退役，默认无 key。"""
     providers = _providers_config().get("providers", {})
@@ -848,6 +874,10 @@ def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_se
         
         for fact in facts:
             text = fact["text"] if isinstance(fact, dict) else fact
+            # 凭据闸门：密码/key/token 不入记忆（2026-11-11 审计）
+            text, was_redacted = redact_credentials(text)
+            if was_redacted:
+                print("  🔒 凭据已脱敏")
             et = fact.get("event_time") if isinstance(fact, dict) else None
             et_prec = "day" if et else None
             if not et:
