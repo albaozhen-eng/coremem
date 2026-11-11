@@ -28,6 +28,10 @@ STAMP = datetime.now().strftime("%Y-%m-%d")
 EXTRA_SOURCES = [
     ("workspace", Path(os.environ.get("MEM_BACKUP_WORKSPACE") or Path.home() / ".coremem" / "memory")),
     ("config", Path(os.environ.get("MEM_BACKUP_CONFIG") or Path.home() / ".coremem/config")),
+    # 2026-11-11 审计补：MEMORY.md 在 ~/.coremem/ 根目录，**不在 memory/ 里**，
+    # 所以「备份扩容 workspace」那次仍漏了它（注释写着含 MEMORY.md，实际不含）。
+    # 它含人工确认的 DERIVED 规则，丢了要重新评审。跟着 MEM_MEMORY_MD 配置走。
+    ("memory_md", Path(os.environ.get("MEM_MEMORY_MD") or Path.home() / ".coremem" / "MEMORY.md")),
 ]
 for _spec in os.environ.get("MEM_BACKUP_EXTRA", "").split(","):
     if ":" in _spec:
