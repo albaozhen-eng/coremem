@@ -68,7 +68,9 @@ with tempfile.TemporaryDirectory() as td:
     heartbeat.STATE_F = root / "state.json"
     heartbeat.CAPTURE_LOG = root / "capture.log"
     heartbeat.FACTS = root / "facts.jsonl"
-    heartbeat.check = lambda: ([("test_down", "test outage")], None, None)
+    # check() 现在返回 4 元组（第四项 idle_note：「无输入」不是故障的说明），
+    # 桩必须同步，否则 main() 解包直接 ValueError。
+    heartbeat.check = lambda: ([("test_down", "test outage")], None, None, None)
     with patch.object(sys, "argv", ["memory_heartbeat_sentinel.py"]):
         with patch.object(heartbeat.notify, "send", return_value=False):
             heartbeat.main()
