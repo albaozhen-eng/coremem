@@ -49,6 +49,37 @@ bash deploy/deploy.sh --force        # 确需覆盖生产改动时才用
 的 AUTO 区块退役守卫也会一并丢失。处置：把生产版本回灌仓库（提交 `92147c4`），
 并在 `patch_deploy.py` 增加 `--check-drift`、`deploy.sh` 默认启用。
 
+## 模型通道（加/换模型不用改代码）
+
+采集与门控用的 LLM 通道完全由 `~/.coremem/config/providers.json`（或
+`MEM_PROVIDERS_CONFIG` 指过去的那份，0600、不进 git）决定：
+
+```json
+{
+  "capture_channels": ["omlx", "bailian:qwen3.8-flash", "bailian:qwen4-max-preview",
+                       "scnet-tp", "deepseek"],
+  "providers": {
+    "omlx":     { "enabled": false },
+    "bailian":  { "baseUrl": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+                  "apiKey": "sk-…", "models": ["qwen3.8-flash", "qwen4-max-preview"],
+                  "extra": { "enable_thinking": false }, "timeout": 240 },
+    "scnet-tp": { "apiKey": "sk-tp-…", "baseUrl": "https://api.scnet.cn/api/llm/v1",
+                  "models": ["Qwen3.8-Max", "Kimi-K3"] },
+    "deepseek": { "apiKey": "sk-…" }
+  }
+}
+```
+
+- `capture_channels` 决定顺序与降级路径；`provider` 或 `provider:model` 都可写，未列出的模型不挂。
+- 没列 `capture_channels` 就用内置默认顺序（omlx → bailian → scnet-tp → deepseek），
+  云端 provider 只在拿到 key 时才挂链（没 key 挂了也是每轮白撞一次 401）。
+- 推理模型记得关思考链（百炼用 `extra.enable_thinking=false`；本地 omlx 代码里已自动带
+  `chat_template_kwargs`）：否则 `max_tokens` 会被 reasoning 吃空 → empty content → 判失败降级。
+- 账户级错误（401/402/403）不重试、直接跳下一通道；其余错误每通道一次重试。
+- 断网演练：`MEMORY_CAPTURE_SKIP_CHANNELS="bailian:qwen3.8-flash,scnet-tp"` 可跳过指定通道。
+- 实测参考（2026-11-03）：百炼 flash ≈1.2s；qwen4-max ≈50s 且会 429（宜作兜底不宜当主力）；
+  DeepSeek 官网 ≈1s；scnet 订阅过期时三条 403 秒跳，总耗时仍 ≈1s。
+
 ## 注意
 - 生产脚本被 launchd 直接引用路径（`~/.coremem/scripts/*.py`），deploy 即热更新，无需重启服务。
 - Windows 上 OpenClaw 工作区路径为 `%USERPROFILE%\.openclaw\...`，`Path.home()` 自适应。

@@ -16,6 +16,35 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Regression runner plus isolated tests for source selection, archive reads, wake, alert delivery/retry and deploy guards.
 
+## [Unreleased] - 2026-11-03 (模型通道配置化)
+
+### Changed
+- `src/memory_capture.py::_build_llm_channels` 重写为**配置驱动**（v1.5）：通道取舍此前写死在
+  代码里，而「哪家充值了、哪个模型退役、哪个端点老超时」是每周都在变的运维事实，每次调整都
+  要改代码 → 部署 → 过漂移检查。现在只改 `~/.coremem/config/providers.json`：
+  `capture_channels`（顺序与取舍，支持 `provider` 或 `provider:model`）+ `providers.<名>`
+  （baseUrl/apiKey/models/model/timeout/enabled/extra）。未知 provider 名也能直接用，
+  不必改代码；环境变量 `<PROVIDER>_API_KEY/_BASE_URL/_MODEL` 优先于文件。
+- 本地通道识别从「通道名 == local-omlx-flash」改为 `channel["local"]` 标志位（provider 名
+  现在可变）；`MEMORY_CAPTURE_SKIP_CHANNELS` 同时支持 provider 名与通道名。
+
+### Added
+- 百炼 Qwen4：`bailian` provider 默认模型 `qwen4-max-preview` + `qwen3.8-flash`
+  （2026-11-03 实测均正常出文；2026-10-03 的 403 全线退役已解除）。
+  百炼推理模型必须关思考链，故 provider 级 `extra: {"enable_thinking": false}`：
+  不关时 `max_tokens` 会被 `reasoning_content` 吃空，triage（max_tokens=100）实测 100% 报
+  empty content。实测延迟：flash ≈1.2s，qwen4-max ≈50s 且会 429 限流 —— 因此 qwen4 宜作
+  质量兜底、flash 作主力。
+- SCNet TokenPlan 模型清单恢复：`Qwen3.8-Max` / `DeepSeek-V4-Flash-0731` / `Kimi-K3`
+  （端点 `https://api.scnet.cn/api/llm/v1`）。当前订阅仍过期（HTTP 403
+  「Token Plan subscription is expired」），挂链无害：403 属账户级错误不重试、每条秒跳，
+  实测三条 scnet 全 403 时总耗时仍 1.0s；续费后改配置即生效。
+
+### Fixed
+- `tests/test_flush.py` 未注入 `MEM_SEMANTIC_GRAPH_ID`：`plugmem_cfg()` 在 import 期硬校验
+  graph id（防静默写错图），因此在**没装过 coremem 的机器上整个测试直接抛错**。补 setdefault
+  占位值，测试与宿主配置解耦。
+
 ## [Unreleased] - 2026-11-03 (安装体验)
 
 ### Added

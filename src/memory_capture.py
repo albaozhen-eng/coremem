@@ -432,112 +432,161 @@ def extract_facts_with_llm(conversation: str) -> list[str]:
     return extract_facts_via_llm(conversation)
 
 
+# provider 名 → 端点/模型默认。云端 provider 只有拿到 key 时才挂链（没 key 挂了也是
+# 每轮白撞一次 401）；顺序由 capture_channels 决定，缺省按这里定义的顺序。
+_LLM_PROVIDERS = {
+    "omlx": {
+        "name": "local-omlx-flash",          # _llm_chat 与回归测试按此名识别本地通道
+        "base": "http://127.0.0.1:9999/v1",
+        "models": ["Qwen3.8-Flash-Next-oQ4e-mtp"],
+        "local": True,                        # 本地服务：无配额、无 402，key 只是占位
+        "key": "omlx-local",
+    },
+    "bailian": {   # 阿里云百炼 TokenPlan（订阅内免费）。2026-10-03 曾因 4/4 全 403 退役，
+                   # 2026-11-03 实测 qwen4-max-preview / qwen3.8-flash 均正常出文后恢复挂链。
+        "name": "bailian",
+        "base": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "models": ["qwen4-max-preview", "qwen3.8-flash"],
+        # qwen4/qwen3 是推理模型：不关思考链时 max_tokens 会被 reasoning_content 吃空，
+        # triage（max_tokens=100）实测 100% 报 empty content。百炼兼容模式认这个顶层参数。
+        "extra": {"enable_thinking": False},
+    },
+    "scnet-tp": {   # 国家超算互联网 TokenPlan（订阅制，免费额度内）。
+                   # 2026-10-03 与 2026-11-03 实测均 HTTP 403「Token Plan subscription is
+                   # expired」——订阅未续费时这条链每轮都会被自动跳过（403 不重试），
+                   # 续费后改 providers.json 即可挂回，不用动代码。
+        "name": "scnet-tp",
+        "base": "https://api.scnet.cn/api/llm/v1",
+        "models": ["Qwen3.8-Max", "DeepSeek-V4-Flash-0731", "Kimi-K3"],
+    },
+    "deepseek": {   # 官网按量付费：能不走就不走（本任务每 30min 高频）。
+        "name": "deepseek-official",
+        "base": "https://api.deepseek.com/v1",
+        "models": ["deepseek-chat"],
+    },
+}
+_LLM_DEFAULT_ORDER = ["omlx", "bailian", "scnet-tp", "deepseek"]
+_CLOUD_TIMEOUT = 240   # 云端固定 240s：推理模型的 reasoning 要时间，60s 档实测频繁 read timeout
+
+
+def _env_provider(name: str) -> dict:
+    """环境变量取某 provider 的 key/base/model：MEM_LLM_<名>_API_KEY 或 <名>_API_KEY。"""
+    up = name.upper().replace("-", "_")
+    out = {}
+    for suffix, field in (("_API_KEY", "key"), ("_BASE_URL", "base"), ("_MODEL", "model")):
+        v = os.environ.get(f"MEM_LLM_{up}{suffix}") or os.environ.get(f"{up}{suffix}")
+        if v:
+            out[field] = v
+    return out
+
+
 def _build_llm_channels(default_timeout: int) -> list[dict]:
-    """构建 fallback 通道链（v1.4，2026-09-11 通道韧性修复）。
+    """构建 fallback 通道链（v1.5：通道由配置决定，不再写死在代码里）。
 
-    顺序（实证依据：09-11 memory_capture_30m.err.log 多轮 bailian-qwen read timeout →
-    deepseek-official HTTP 402 余额尽 → 全链失败；同日本地 omlx 评分 8 人批 68s 全解析）：
-      1. local-omlx-flash   本机 omlx（零配额/零402/零云端排队），端点从 llm-policy.json 读
-      2. bailian            deepseek-v4-flash-0731（TokenPlan 免费，timeout 240s）
-      3. scnet-tp           DeepSeek-V4-Flash（免费镜像通道）
-      4. bailian-qwen       qwen3.8-flash（同端点稳定出文兜底）
-    每通道独立 timeout + 单次重试（见 _llm_chat）。
+    为什么要配置化：通道的取舍（哪家充值了、哪个模型退役、哪个端点老超时）是每周都变的
+    运维事实，写死在代码里等于每次调整都要改代码 → 部署 → 过漂移检查。现在只改
+    `~/.coremem/config/providers.json`（或 MEM_PROVIDERS_CONFIG 指过去的那份）：
+
+      {
+        "capture_channels": ["omlx", "bailian:qwen4-max-preview", "deepseek"],
+        "providers": {
+          "bailian":  {"baseUrl": "…", "apiKey": "sk-…",
+                       "models": ["qwen4-max-preview", "qwen3.8-flash"], "timeout": 240},
+          "deepseek": {"apiKey": "sk-…"},
+          "omlx":     {"enabled": false}
+        }
+      }
+
+    规则：
+      - `capture_channels` 决定顺序与取舍，条目写 `provider` 或 `provider:model`；
+        省略它 = 按 _LLM_DEFAULT_ORDER 用各 provider 的默认模型列表。
+      - `providers.<名>` 覆盖端点/密钥/模型/timeout/enabled；`enabled: false` 直接不挂。
+      - 环境变量优先于文件：`<PROVIDER>_API_KEY` / `_BASE_URL` / `_MODEL`
+        （连字符转下划线，如 SCNET_TP_API_KEY）；本地 omlx 另认 MEM_OMLX_BASE_URL /
+        MEM_OMLX_MODEL / MEM_OMLX_API_KEY / MEM_OMLX_DISABLED。
+      - 一个 provider 列多个模型 = 多条通道，通道名带模型后缀，失败按序降级。
+      - 未知 provider 名也能用（自带 baseUrl/apiKey/model 即可），不必改代码。
+      - 提取 prompt、JSON 输出格式、Triage Gate、调度参数一律不动（unified-facts
+        下游格式锁死）；这里只决定「问谁」。
+
+    历史实证（结论留着，别再踩）：
+      2026-09-11 bailian-qwen read timeout 频发 + deepseek-official HTTP 402 余额尽 → 全链
+                失败：于是把本机 omlx 提为通道 1，并给每通道独立 timeout + 单次重试。
+      2026-10-03 百炼 4/4 全 403「Access to model denied」、scnet 订阅过期 → 云端通道退役，
+                只剩本地单通道；本地不可用则 fail-loud、不标 processed、下轮重试。
+      2026-11-03 只接 DeepSeek 的机器用 omlx.enabled=false（或 MEM_OMLX_DISABLED=1）关掉本地
+                通道，否则每轮白等一次唤醒超时（实测 90s）；同日百炼恢复正常，qwen4 可用。
     """
-    raw_cfg = _providers_config()
-    providers = (raw_cfg.get("models", {}).get("providers", {})
-                 or raw_cfg.get("providers", {}) or raw_cfg)
+    raw = _providers_config()
+    providers = (raw.get("models", {}).get("providers", {})
+                 or raw.get("providers", {}) or {})
+    order = raw.get("capture_channels") or _LLM_DEFAULT_ORDER
 
-    # llm-policy.json：本地模型与端点（primary=local-omlx-flash 策略源）
+    # llm-policy.json：历史遗留的本机模型/端点来源，仅作兼容，不再是必需。
     try:
         policy = json.loads((Path.home() / ".boss-agent" / "llm-policy.json").read_text())
     except Exception:
         policy = {}
 
-    channels = []
+    if str(os.environ.get("MEM_OMLX_DISABLED", "")).lower() in ("1", "true", "yes"):
+        providers = {**providers, "omlx": {**(providers.get("omlx") or {}), "enabled": False}}
+    if policy.get("local_base") or policy.get("omlx_base"):
+        om = dict(providers.get("omlx") or {})
+        om.setdefault("baseUrl", policy.get("local_base") or policy.get("omlx_base"))
+        if policy.get("local_model"):
+            om.setdefault("model", policy["local_model"])
+        providers = {**providers, "omlx": om}
 
-    # 通道 1：local-omlx-flash（本机 omlx，主力）。端点解析：policy.local_base →
-    # coremem providers.omlx.baseUrl → 127.0.0.1:9999/v1。本地无 402/配额问题，
-    # timeout 用调用方值（提取 90s / triage 30s 足够；实测提取 6000 字 <70s）。
-    # 2026-11-03：本机没有 omlx 的机器可关掉这条通道（providers.omlx.enabled=false 或
-    # MEM_OMLX_DISABLED=1），否则每轮要白等一次唤醒超时（实测 90s）才轮到云端通道。
-    _omlx_off = (str(os.environ.get("MEM_OMLX_DISABLED", "")).lower() in ("1", "true", "yes")
-                 or providers.get("omlx", {}).get("enabled") is False)
-    local_base = (os.environ.get("MEM_OMLX_BASE_URL")
-                  or policy.get("local_base") or policy.get("omlx_base")
-                  or providers.get("omlx", {}).get("baseUrl")
-                  or "http://127.0.0.1:9999/v1")
-    if not _omlx_off:
-        channels.append({
-            "name": "local-omlx-flash",
-            "url": local_base.rstrip("/") + "/chat/completions",
-            "base_url": local_base.rstrip("/"),
-            "model": os.environ.get("MEM_OMLX_MODEL") or policy.get("local_model") or "Qwen3.8-Flash-Next-oQ4e-mtp",
-            "key": os.environ.get("MEM_OMLX_API_KEY") or providers.get("omlx", {}).get("apiKey") or "omlx-local",
-            "timeout": max(int(default_timeout), 30),
-        })
+    channels: list[dict] = []
+    for spec in order:
+        pname, _, want_model = str(spec).partition(":")
+        pname = pname.strip()
+        proto = _LLM_PROVIDERS.get(pname) or {"name": pname, "base": "", "models": [], "key": ""}
+        pcfg = providers.get(pname) or {}
+        if pcfg.get("enabled") is False:
+            continue
 
-    # 通道 2/3/4（百炼 deepseek-v4-flash-0731 / scnet-tp / 百炼 qwen3.8-flash）
-    # 2026-10-03 退役（Brian BA2 正式弃用百炼）：百炼自 09-28 起推理 4/4 全 403
-    # 「Access to model denied」，scnet-tp 订阅过期 403 —— 三条通道每轮各撞一次死端点。
-    # 现链路 = 本地 omlx 单通道；本地不可用则全链失败 → fail-loud、不标 processed、下轮重试。
-    # 云备胎挂回需 Brian 批准：本任务每 30min 高频，走 deepseek 官网=按量付费，不擅自切。
-    bailian_key = ""   # 退役占位（下游 if 结构保持不动，永不再挂百炼）
-    bailian_base = ""
-    if bailian_key:
-        # 通道 2：百炼 TokenPlan deepseek-v4-flash-0731。推理模型 reasoning 可能吃空
-        # max_tokens → empty content 视为失败降级；大对话实测可超 60s → timeout 240s。
-        channels.append({
-            "name": "bailian",
-            "url": bailian_base.rstrip("/") + "/chat/completions",
-            "model": "deepseek-v4-flash-0731",
-            "key": bailian_key,
-            "timeout": 240,
-        })
+        env = _env_provider(pname)
+        if pname == "omlx":
+            env["base"] = os.environ.get("MEM_OMLX_BASE_URL") or env.get("base") or ""
+            env["model"] = os.environ.get("MEM_OMLX_MODEL") or env.get("model") or ""
+            env["key"] = os.environ.get("MEM_OMLX_API_KEY") or env.get("key") or ""
 
-    # 通道 3：scnet-tp DeepSeek-V4-Flash（免费镜像，独立供应商避免同端点连坐）
-    scnet_key = os.environ.get("SCNET_API_KEY") or providers.get("scnet-tp", {}).get("apiKey", "")
-    scnet_base = providers.get("scnet-tp", {}).get("baseUrl", "") or "https://api.scnet.cn/api/llm/v1"
-    if scnet_key:
-        channels.append({
-            "name": "scnet-tp",
-            "url": scnet_base.rstrip("/") + "/chat/completions",
-            "model": "DeepSeek-V4-Flash",
-            "key": scnet_key,
-            "timeout": 240,
-        })
+        base = (env.get("base") or pcfg.get("baseUrl") or pcfg.get("base_url")
+                or proto.get("base") or "")
+        if not base:
+            continue  # 没有端点就无从建通道（不挂必撞空的死端点）
 
-    # 通道 4：百炼 qwen3.8-flash（末位兜底；09-11 用 qwen3.8-max 时 read timeout 频发，
-    # 换 flash 档降延迟，同端点稳定出文）
-    if bailian_key:
-        channels.append({
-            "name": "bailian-qwen",
-            "url": bailian_base.rstrip("/") + "/chat/completions",
-            "model": "qwen3.8-flash",
-            "key": bailian_key,
-            "timeout": 240,
-        })
+        models = ([want_model] if want_model else
+                  [env["model"]] if env.get("model") else
+                  [pcfg["model"]] if pcfg.get("model") else
+                  (pcfg.get("models") or proto.get("models") or []))
+        key = (env.get("key") or pcfg.get("apiKey") or pcfg.get("api_key") or proto.get("key") or "")
+        if not key:
+            continue  # 云端无 key 不挂链：账户级 401 每轮白打一次，没有意义
 
-    # 通道 5：DeepSeek 官网（2026-11-03 恢复挂链）。09-11 因 HTTP 402 余额尽拦掉，本次实测
-    # key 回包正常、deepseek-chat 可用，故改为配置驱动（providers.deepseek 或 DEEPSEEK_* env），
-    # 无需改代码即可开关；key 缺失时不建通道（不会每轮白撞一次 401）。
-    ds_cfg = providers.get("deepseek", {})
-    ds_key = os.environ.get("DEEPSEEK_API_KEY") or ds_cfg.get("apiKey", "")
-    ds_base = (os.environ.get("DEEPSEEK_BASE_URL") or ds_cfg.get("baseUrl", "")
-               or "https://api.deepseek.com/v1")
-    if ds_key:
-        channels.append({
-            "name": "deepseek-official",
-            "url": ds_base.rstrip("/") + "/chat/completions",
-            "model": os.environ.get("DEEPSEEK_MODEL") or ds_cfg.get("model", "") or "deepseek-chat",
-            "key": ds_key,
-            "timeout": 240,
-        })
+        for model in models:
+            channels.append({
+                "name": f"{proto['name']}:{model}" if (want_model or len(models) > 1) else proto["name"],
+                "provider": pname,
+                "url": base.rstrip("/") + "/chat/completions",
+                "base_url": base.rstrip("/"),
+                "model": model,
+                "key": key,
+                "local": bool(proto.get("local")),
+                # provider 级附加请求参数（如百炼的 enable_thinking）；文件里可覆盖
+                "extra": (pcfg.get("extra") if pcfg.get("extra") is not None
+                          else proto.get("extra") or {}),
+                # 本地通道用调用方 timeout（提取 90s / triage 30s 足够，实测 6000 字 <70s）
+                "timeout": (max(int(default_timeout), 30) if proto.get("local")
+                            else int(pcfg.get("timeout") or proto.get("timeout") or _CLOUD_TIMEOUT)),
+            })
 
-    # 测试钩子（断网演练）：MEMORY_CAPTURE_SKIP_CHANNELS="local-omlx-flash" 跳过指定通道
-    import os as _os
-    skip = {s.strip() for s in _os.environ.get("MEMORY_CAPTURE_SKIP_CHANNELS", "").split(",") if s.strip()}
+    # 测试钩子（断网演练）：MEMORY_CAPTURE_SKIP_CHANNELS 支持 provider 名或通道名，
+    # 例如 "omlx" / "local-omlx-flash" / "bailian:qwen4-max-preview"。
+    skip = {s.strip() for s in os.environ.get("MEMORY_CAPTURE_SKIP_CHANNELS", "").split(",") if s.strip()}
     if skip:
-        channels = [c for c in channels if c["name"] not in skip]
+        channels = [c for c in channels if c["name"] not in skip and c["provider"] not in skip]
     return channels
 
 
@@ -556,13 +605,13 @@ def _llm_chat(prompt: str, max_tokens: int, temperature: float, timeout: int = 2
         return None
 
     # coremem 自有唤醒器：不再向 OpenClaw 脚本目录注入 sys.path。
-    local_channel = next((c for c in channels if c["name"] == "local-omlx-flash"), None)
+    local_channel = next((c for c in channels if c.get("local")), None)
     if local_channel:
         try:
             from omlx_runtime import ensure_omlx
             if not ensure_omlx(timeout=90, base_url=local_channel["base_url"], model=local_channel["model"]):
                 print("[memory_capture] omlx 唤醒超时(90s)，剔除本地通道", file=sys.stderr)
-                channels = [c for c in channels if c["name"] != "local-omlx-flash"]
+                channels = [c for c in channels if not c.get("local")]
         except Exception as _e:
             print(f"[memory_capture] ensure_omlx 异常（fail-open，按原通道链继续）: {_e}", file=sys.stderr)
 
@@ -577,8 +626,10 @@ def _llm_chat(prompt: str, max_tokens: int, temperature: float, timeout: int = 2
         # 本地 omlx 思考链必须关（与 boss-v4-pipeline 2026-09-08 既定惯例同源，经人力批准）：
         # 不关时 reasoning 泄入 content 污染提取结果（09-11 实弹 251 条中大量“Need maybe include”噪声）。
         # 仅通道级参数，不动 prompt/gate/解析。
-        if ch["name"] == "local-omlx-flash":
+        if ch.get("local"):
             payload["chat_template_kwargs"] = {"enable_thinking": False}
+        if ch.get("extra"):
+            payload.update(ch["extra"])
         body = json.dumps(payload).encode("utf-8")
         ch_timeout = int(ch.get("timeout") or timeout)
         for attempt in (1, 2):   # 每通道单次重试
@@ -597,7 +648,7 @@ def _llm_chat(prompt: str, max_tokens: int, temperature: float, timeout: int = 2
                     # 导致 content 为空串。空响应视为失败，不当作“无事实”结果。
                     if not content or not content.strip():
                         raise ValueError("empty content (reasoning consumed max_tokens)")
-                    if ch["name"] != "local-omlx-flash" or attempt > 1:
+                    if not ch.get("local") or attempt > 1:
                         print(f"[memory_capture] LLM 通道成功: {ch['name']}（第 {attempt} 次尝试）", file=sys.stderr)
                     return content
             except urllib.error.HTTPError as e:

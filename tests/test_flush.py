@@ -12,10 +12,15 @@
 """
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+# memory_write_buffer 在 import 期就要 graph id（plugmem_cfg 会硬校验，避免静默写错图）。
+# 本测试不碰语义层，给个占位值即可 —— 否则在没装过 coremem 的机器上整个测试直接抛错。
+os.environ.setdefault("MEM_SEMANTIC_GRAPH_ID", "unused-in-test")
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC))          # memory_write_buffer 依赖同目录的 plugmem_config
