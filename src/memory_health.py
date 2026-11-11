@@ -302,8 +302,16 @@ def probe_provenance():
             if src is None:
                 continue
             resolvable += 1
-            if mo_common.line_sha(src) == mo_common.line_sha(r.get("content") or ""):
+            got = r.get("content") or ""
+            if mo_common.line_sha(src) == mo_common.line_sha(got):
                 verbatim += 1
+            elif got.rstrip().endswith("…"):
+                # 2026-11-11 审计：检索层对长行截 600 字加 … 是预期行为，
+                # 原探针拿截断文本比全文 sha → 长行永远「不一致」（78.9% 假警报）。
+                # 改验截断部分与源行前缀逐字一致。
+                prefix = mo_common.norm(got.rstrip()[:-1])
+                if prefix and mo_common.norm(src).startswith(prefix):
+                    verbatim += 1
         for r in items:
             if mo_common.parse_ref(r.get("file") or "") and \
                mo_common.line_sha(mo_common.resolve(r.get("file")) or "") == c["sha"]:
