@@ -82,9 +82,16 @@ def main():
             q = " ".join(toks[:3])
             if not q:
                 continue
+            # 2026-11-11 审计：/search 是「整串子串匹配」（needle in text），
+            # 带空格的多词查询永远 0 命中（本机首跑 derived 0% 的根因）。
+            # 改为逐词查询、任一词找回自身即命中，与 memory_recall 的单 token 口径一致。
+            hit = False
             try:
-                d = get(f"/api/v1/graphs/{G}/search?q={urllib.parse.quote(q)}&limit=20")
-                hit = any(n.get("semantic_id") == item["id"] for n in d.get("nodes", []))
+                for tok in toks[:3]:
+                    d = get(f"/api/v1/graphs/{G}/search?q={urllib.parse.quote(tok)}&limit=20")
+                    if any(n.get("semantic_id") == item["id"] for n in d.get("nodes", [])):
+                        hit = True
+                        break
             except Exception:
                 hit = False
             found += hit
