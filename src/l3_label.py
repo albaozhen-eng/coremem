@@ -40,7 +40,7 @@ L3 = importlib.util.module_from_spec(_spec)
 sys.modules["l3"] = L3
 _spec.loader.exec_module(L3)
 
-OUT_DIR = Path(os.environ.get("L3_LABEL_DIR", Path.home() / ".openclaw/workspace-main/memory/golden"))
+OUT_DIR = Path(os.environ.get("L3_LABEL_DIR", Path.home() / ".coremem/memory/golden"))
 
 
 def export(limit: int, days: int, min_cluster: int, threshold: float = 0.80) -> int:

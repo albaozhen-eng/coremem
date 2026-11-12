@@ -14,10 +14,15 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-for _p in (Path(__file__).resolve().parent,
-           Path.home() / ".openclaw" / "workspace" / "scripts"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+# 只把**本脚本所在目录**放进 sys.path。
+# 2026-11-12 审计：原来还把 ~/.openclaw/workspace/scripts 插到最前，
+# 于是 plugmem_config / mo_common 实际是从旧根导入的（实测确认）。
+# 两者当时解析结果相同所以数字没错，但旧版 config 在 graph_id 缺失时会
+# **静默落回 "default" 图**，而 coremem 版特意改成报错 —— 该安全属性被绕过。
+# 迁移后旧根随时可能消失或留存陈旧副本，一律不再引用。
+_p = Path(__file__).resolve().parent
+if str(_p) not in sys.path:
+    sys.path.insert(0, str(_p))
 from plugmem_config import plugmem_cfg
 import mo_common, l1_prov_index as li
 
