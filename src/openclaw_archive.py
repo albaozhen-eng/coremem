@@ -16,7 +16,9 @@ from typing import Optional
 
 class OpenClawArchive:
     def __init__(self, root: Optional[Path] = None):
-        self.root = Path(root or os.environ.get("COREMEM_OPENCLAW_HOME") or (Path.home() / ".openclaw"))
+        # 2026-11-12：归档已迁到 coremem/legacy/agents，不再依赖 ~/.openclaw。
+        # 仍支持 COREMEM_OPENCLAW_HOME 覆盖（便于读旧备份）。
+        self.root = Path(root or os.environ.get("COREMEM_OPENCLAW_HOME") or (Path.home() / ".coremem" / "legacy"))
         self.sessions_dir = self.root / "agents/main/sessions"
         self.db = self.root / "agents/main/agent/openclaw-agent.sqlite"
         self.import_archive_dir = self.root / "agents/main/session-sqlite-import-archive"
