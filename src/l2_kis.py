@@ -86,9 +86,17 @@ def main():
             # 带空格的多词查询永远 0 命中（本机首跑 derived 0% 的根因）。
             # 改为逐词查询、任一词找回自身即命中，与 memory_recall 的单 token 口径一致。
             hit = False
+            # 2026-11-11：两种查询口径**都试，任一命中即算**。
+            # 起因：上游 b5546e5 为修其本机「整串永远 0 命中」改成只逐词查，
+            # 但在本机实测反而从 92% 掉到 13%（同机同数据同 200 题）——
+            # 单个常用词会匹配到大量节点，目标被挤出 limit=20；整串更specific。
+            # 两种口径各有失效场景，取并集才是稳妥判据，不偏袒任一台机器。
             try:
-                for tok in toks[:3]:
-                    d = get(f"/api/v1/graphs/{G}/search?q={urllib.parse.quote(tok)}&limit=20")
+                _queries = [q] + list(toks[:3])
+                for _qq in _queries:
+                    if not _qq:
+                        continue
+                    d = get(f"/api/v1/graphs/{G}/search?q={urllib.parse.quote(_qq)}&limit=20")
                     if any(n.get("semantic_id") == item["id"] for n in d.get("nodes", [])):
                         hit = True
                         break
