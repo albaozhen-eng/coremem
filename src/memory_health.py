@@ -880,6 +880,70 @@ def probe_l2_recall():
     return mo_common.check("l2_recall", "语义层召回（L2 已知项）", "green", round(cd, 1), "%", detail)
 
 
+def probe_throughput():
+    """管道吞吐量：近 24h 新增事实数（2026-11-15 审计新增）。
+
+    为什么需要：11-13~11-15 断供 2 天，只有 l1 探针报红。
+    write_fidelity / dup_guard 读的都是**账本历史行**——只验证"过去写对了"，
+    管道彻底停产它们照样全绿。缺的是"单位时间产出"这个量。
+
+    判据（关键是区分两种零产出）：
+      有会话活动 + 零新增事实 → red   真断供
+      无会话活动 + 零新增事实 → green 没输入，不是故障
+      有新增事实              → green
+    这条区分来自 11-06 的教训：当时哨兵把"56h 没人说话"报成"LLM 全通道死"。
+    """
+    import time as _t
+    facts_f = MEMORY_DIR / "unified-facts.jsonl"
+    if not facts_f.exists():
+        return mo_common.check("throughput", "管道吞吐量（近24h）", "yellow", None, "",
+                               f"事实池不存在（{facts_f}）", record_only=True)
+    cutoff = _t.time() - 24 * 3600
+    n_new = 0
+    try:
+        with facts_f.open(encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ts = json.loads(line).get("timestamp")
+                    if not ts:
+                        continue
+                    dt = datetime.fromisoformat(ts)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if dt.timestamp() >= cutoff:
+                        n_new += 1
+                except (ValueError, TypeError):
+                    continue
+    except OSError as e:
+        return mo_common.check("throughput", "管道吞吐量（近24h）", "yellow", None, "",
+                               f"读事实池失败：{e}", record_only=True)
+
+    # 同期是否有输入（pi 会话 mtime）
+    sess_dir = HOME / ".pi" / "agent" / "sessions"
+    n_sess = -1
+    try:
+        n_sess = sum(1 for f in sess_dir.glob("*/*.jsonl")
+                     if f.stat().st_mtime >= cutoff)
+    except OSError:
+        n_sess = -1
+
+    if n_new > 0:
+        return mo_common.check("throughput", "管道吞吐量（近24h）", "green", n_new, "条",
+                               f"近24h 新增 {n_new} 条事实｜同期活跃会话 {n_sess} 个")
+    if n_sess == 0:
+        return mo_common.check("throughput", "管道吞吐量（近24h）", "green", 0, "条",
+                               "近24h 无会话活动 → 无输入，零产出属正常（非故障）")
+    if n_sess < 0:
+        return mo_common.check("throughput", "管道吞吐量（近24h）", "yellow", 0, "条",
+                               f"零产出，但会话目录不可读（{sess_dir}），无法判定是否有输入")
+    return mo_common.check("throughput", "管道吞吐量（近24h）", "red", 0, "条",
+                           f"真断供：近24h 有 {n_sess} 个活跃会话却零新增事实 —— 查 capture 提取链路/LLM 通道",
+                           red_at=0)
+
+
 def main():
     # 先建输出目录：probe_consolidation 会写 .consolidation-count，
     # 目录不存在时会在探针内抛 FileNotFoundError（生产目录恰好存在，故此前未暴露）。
@@ -901,6 +965,7 @@ def main():
         # 将来若引入 LLM 检索再挂回。
         ("retrieval", probe_retrieval),
         ("l2_recall", probe_l2_recall),
+        ("throughput", probe_throughput),
     ]
     checks = []
     for _cid, _fn in _probes:
