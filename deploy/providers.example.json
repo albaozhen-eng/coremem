@@ -1,0 +1,24 @@
+{
+  "_note": "coremem 自有 LLM 通道配置。只覆盖 capture_channels，其余（端点/key/extra）沿用代码内置原型。",
+  "_why": [
+    "2026-11-15 审计：本地 Qwen3.8-Flash-Next-oQ4e-mtp 被 oMLX 内存守卫拒绝（HTTP 400，",
+    "prefill 需 122.66GB > 上限 98.95GB，因 max_context_window=131072）。",
+    "云端百炼可用时靠兜底能跑，遇限流则全链断 → L1 断供 2 天。",
+    "实测同机 Qwen3-8B-mlx-4bit 返回 200，故在本地档位后插入它作二级本地兜底，",
+    "把单点从『云端』拉回『本地两级』。capture 只送 ~6000 字，8B 足够。",
+    "",
+    "为什么用 capture_channels 显式写 provider:model 而不是给 omlx 加 models 列表：",
+    "~/.boss-agent/llm-policy.json 的 local_model 会被 setdefault 成单个 model，",
+    "而 pcfg['model'] 优先级高于 pcfg['models']，加列表会被它压掉。",
+    "capture_channels 的 want_model 优先级最高，可绕过该兼容逻辑。",
+    "",
+    "未降 Flash 的 max_context_window：boss-v4-pipeline.py:429 本地 prompt 预算 36000 字符",
+    "+ max_tokens 16000 ≈ 52000 token，降到 32768 会截断 BOSS 评分链路。需单独评估。"
+  ],
+  "capture_channels": [
+    "omlx:Qwen3.8-Flash-Next-oQ4e-mtp",
+    "omlx:Qwen3-8B-mlx-4bit",
+    "bailian:qwen4-max-preview",
+    "bailian:qwen3.8-flash"
+  ]
+}

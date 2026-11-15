@@ -865,11 +865,17 @@ def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_se
             # 补跑模式（--continue-on-error）：跳过该 session 续跑下一个，但连续失败 ≥5 次
             # 判定为真断供（LLM 全通道死），停止以免空转浪费配额。
             consec_fail += 1
-            if continue_on_error and consec_fail < 5:
-                print(f"  ⏭️ 提取失败（第 {consec_fail} 次连续），跳过标记、续跑下一个 session")
+            # 2026-11-15 审计：原默认模式**一次失败就停整轮**。实测 11-13~11-15 断供 2 天，
+            # 就是本地 Flash 被内存守卫拒(400) + 云端偶发限流，每轮首个 session 失败即 break，
+            # 后面本来能成的 session 全被跳过。改为两种模式都有界容忍：
+            #   默认 3 次、补跑 5 次连续失败才判真断供停轮。
+            # 不标记 processed，失败的 session 下轮仍会重试，不会丢。
+            _limit = 5 if continue_on_error else 3
+            if consec_fail < _limit:
+                print(f"  ⏭️ 提取失败（第 {consec_fail}/{_limit} 次连续），跳过标记、续跑下一个 session")
                 continue
             print(f"  ⏭️ 提取失败，跳过标记，本轮停止"
-                  + (f"（连续 {consec_fail} 次失败，判定真断供）" if continue_on_error else ""))
+                  f"（连续 {consec_fail} 次失败 ≥{_limit}，判定真断供）")
             break
         
         for fact in facts:

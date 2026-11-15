@@ -87,7 +87,14 @@ with tempfile.TemporaryDirectory() as td:
 
     with patch.dict(os.environ, {"MEM_OMLX_BASE_URL": "http://127.0.0.1:9999/v1"}, clear=False):
         channels = mc._build_llm_channels(30)
-    check("无 OpenClaw 配置仍保留本地 omlx 通道", channels[0]["name"] == "local-omlx-flash")
+    # 不变量是「本地通道存在且居首」，不是名字字面量。
+    # 2026-11-15：capture_channels 显式写 provider:model 后，通道名会带模型后缀
+    # （local-omlx-flash:Qwen3.8-...）。代码一律按 ch["local"] 标志判定本地通道
+    # （omlx 唤醒、关思考链都是），故按标志+前缀断言，不锁死名字格式。
+    check("无 OpenClaw 配置仍保留本地 omlx 通道",
+          bool(channels) and channels[0].get("local") is True
+          and str(channels[0]["name"]).startswith("local-omlx-flash"),
+          f"首通道 {channels[0]['name'] if channels else '无'}")
 
     # A preview must not mark a session processed and suppress the real backfill.
     long_session = pi / "long.jsonl"
