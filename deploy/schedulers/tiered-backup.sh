@@ -93,7 +93,7 @@ checkpoint_backup() {
     
     # 创建检查点（包含完整状态）
     _SRC=()
-    while IFS= read -r _s; do [ -n "$_s" ] && _SRC+=("$_s"); done < <(existing_sources ".coremem/memory" ".coremem/data" ".coremem/MEMORY.md" ".coremem/scripts" ".coremem/config" ".openclaw/workspace" ".openclaw/scripts" ".openclaw/config" "projects/my-wiki" "knowledge-base")
+    while IFS= read -r _s; do [ -n "$_s" ] && _SRC+=("$_s"); done < <(existing_sources ".coremem/memory" ".coremem/data" ".coremem/MEMORY.md" ".coremem/scripts" ".coremem/config" ".boss-agent" ".openclaw/workspace" ".openclaw/scripts" ".openclaw/config" "projects/my-wiki" "knowledge-base")
     tar -czf "${checkpoint_file}" \
         --exclude='*.log' \
         --exclude='node_modules' \
@@ -122,7 +122,7 @@ weekly_backup() {
     
     # 创建全量备份
     _SRC=()
-    while IFS= read -r _s; do [ -n "$_s" ] && _SRC+=("$_s"); done < <(existing_sources ".coremem" ".openclaw" "knowledge-base")
+    while IFS= read -r _s; do [ -n "$_s" ] && _SRC+=("$_s"); done < <(existing_sources ".coremem" ".boss-agent" ".openclaw" "knowledge-base")
     tar -czf "${weekly_file}" \
         --exclude='*.log' \
         --exclude='node_modules' \
@@ -156,7 +156,7 @@ monthly_backup() {
     
     # 创建月度归档（包含 Git 历史）
     _SRC=()
-    while IFS= read -r _s; do [ -n "$_s" ] && _SRC+=("$_s"); done < <(existing_sources ".coremem" ".openclaw" "knowledge-base")
+    while IFS= read -r _s; do [ -n "$_s" ] && _SRC+=("$_s"); done < <(existing_sources ".coremem" ".boss-agent" ".openclaw" "knowledge-base")
     tar -czf "${monthly_file}" \
         --exclude='node_modules' \
         --exclude='__pycache__' \
