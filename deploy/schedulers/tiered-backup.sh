@@ -9,8 +9,10 @@ set -e
 # 配置
 BACKUP_ROOT="${HOME}/.coremem/backups/tiered"
 LOG_DIR="${HOME}/.coremem/logs"
-WORKSPACE_DIR="${HOME}/.openclaw/workspace"
-SCRIPTS_DIR="${HOME}/.openclaw/scripts"
+# 2026-11-15 审计：原指 ~/.openclaw/workspace，旧根删除后 daily_backup 会 error_exit
+# 导致**整个备份任务失败**（不只是 git 快照）。改指 BOSS 新家（它本身是 git 仓库）。
+WORKSPACE_DIR="${MEM_BACKUP_GIT_DIR:-${HOME}/.boss-agent}"
+SCRIPTS_DIR="${HOME}/.boss-agent/scripts"
 KNOWLEDGE_DIR="${HOME}/knowledge-base"
 DATE=$(date +%Y%m%d)
 DATETIME=$(date +%Y%m%d-%H%M%S)
@@ -58,7 +60,12 @@ error_exit() {
 daily_backup() {
     log "📅 开始每日增量备份 (Git)..."
     
-    cd "${WORKSPACE_DIR}" || error_exit "无法进入工作目录"
+    # 目录缺失只跳过 git 快照，不再拖垮整个备份（tar 归档与它无关）。
+    if [ ! -d "${WORKSPACE_DIR}" ]; then
+        log "  ⏭️ 跳过 git 增量：${WORKSPACE_DIR} 不存在（不影响 tar 归档）"
+        return 0
+    fi
+    cd "${WORKSPACE_DIR}" || { log "  ⏭️ 跳过 git 增量：无法进入 ${WORKSPACE_DIR}"; return 0; }
     
     # 检查 git 仓库
     if [ ! -d ".git" ]; then

@@ -45,29 +45,49 @@ done
 add "活跃 plist 引用" "$([ "$n" -gt 0 ] && echo 1 || echo 0)" "$n 个${hits:+ →$hits}" \
     "任一非 0 即删后静默失效"
 
-# ── 2. 活体脚本是否还引用旧根（白名单：有意保留的）──
-#   tiered-backup.sh   备份旧根（删前保护，删后该源自动跳过）
-#   openclaw_archive.py 注释里提到旧根（实际默认已指 coremem/legacy）
-n=0; hits=""
-for d in "$H/.coremem/scripts" "$H/.boss-agent/scripts"; do
-    [ -d "$d" ] || continue
-    for f in "$d"/*.py "$d"/*.sh; do
-        [ -f "$f" ] || continue
+# ── 2. 已部署脚本是否还引用旧根（阻塞）+ 仓库副本（仅提示）──
+#   2026-11-15 审计补两点：
+#   ① 原来只扫 2 个目录，漏掉 skills-openclaw 与 projects；
+#   ② 但把它们一律算阻塞会造出大量噪音——那些是仓库副本/历史备份，不是活体。
+#      噪音大的闸门会被人忽略，等于没有闸门。
+#   所以分两级：**已部署目录**里的引用才阻塞；仓库/技能副本只报数供人判断。
+#   两级都排除 .backup/.bak/node_modules/.git/dist，且只看 .py/.sh
+#   （.json 里的旧路径是历史数据记录，删旧根不影响）。
+_scan_refs() {   # $1=根目录 → 输出命中文件名（每行一个）
+    find "$1" -maxdepth 4 \( -name node_modules -o -name .git -o -name dist \
+         -o -name '.backup*' -o -name '*.bak*' \) -prune -o \
+         \( -name '*.py' -o -name '*.sh' \) -type f -print 2>/dev/null |
+    while IFS= read -r f; do
         b=$(basename "$f")
         case "$b" in
-            # 有意保留：备份旧根 / 读历史归档（默认已指 coremem/legacy）
             tiered-backup.sh|openclaw_archive.py) continue;;
-            # 本闸门与到期提醒自身以旧根为检查目标，必然引用它，不算阻塞
             openclaw-retire-gate.sh|openclaw-retire-watch.sh) continue;;
         esac
-        # 只算非注释行
-        if grep -vE '^\s*#' "$f" 2>/dev/null | grep -q "\.openclaw"; then
-            n=$((n+1)); hits="$hits $b"
+        if grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | grep -q "\.openclaw"; then
+            echo "$b"
         fi
     done
+}
+
+n=0; hits=""
+for d in "$H/.coremem/scripts" "$H/.boss-agent/scripts" "$H/.boss-agent/skills"; do
+    [ -d "$d" ] || continue
+    while IFS= read -r b; do
+        [ -n "$b" ] || continue
+        n=$((n+1)); hits="$hits $b"
+    done < <(_scan_refs "$d")
 done
-add "活体脚本引用" "$([ "$n" -gt 0 ] && echo 1 || echo 0)" "$n 个${hits:+ →$hits}" \
-    "白名单外的硬编码路径"
+add "已部署脚本引用" "$([ "$n" -gt 0 ] && echo 1 || echo 0)" "$n 个${hits:+ →$hits}" \
+    "活体目录里的硬编码旧根路径"
+
+# 仓库/技能副本：只报数，不阻塞（它们不参与运行；真要清理是另一件事）
+rn=0
+for d in "$H/projects" "$H/.agents/skills-openclaw"; do
+    [ -d "$d" ] || continue
+    c=$(_scan_refs "$d" | wc -l | tr -d ' ')
+    rn=$((rn+c))
+done
+printf '  ℹ️  %-28s %s 个（仓库/技能副本，不参与运行，不阻塞）\n' "仓库副本引用" "$rn"
 
 # ── 3. 是否有进程仍持有旧根文件句柄 ──
 #   改 plist 不影响**已在运行**的常驻进程 —— 10-30 那次就漏了这点。
@@ -77,13 +97,21 @@ add "进程持有旧根句柄" "$([ "$n" -gt 0 ] && echo 1 || echo 0)" "$n 个 $
     "需重启这些进程才会释放"
 
 # ── 4. 近 N 天是否仍有写入（排除迁移备份与已知冷目录）──
+# 2026-11-15 审计补：固定 3 天窗口会漏掉周更/月更任务。
+# 改为「自迁移完成时刻起」——marker 文件存在就用它，否则回落 DAYS 天。
+MARKER="$H/.coremem/health/openclaw-migration-done"
 DAYS="${OC_RETIRE_QUIET_DAYS:-3}"
-n=$(find "$OC" -maxdepth 3 -newermt "-${DAYS} days" -type f 2>/dev/null \
-    | grep -v "premigrate" | wc -l | tr -d ' ')
-tops=$(find "$OC" -maxdepth 3 -newermt "-${DAYS} days" -type f 2>/dev/null \
+if [ -f "$MARKER" ]; then
+    SINCE_REF="$MARKER"; SINCE_DESC="自迁移完成($(date -r "$MARKER" '+%m-%d %H:%M'))"
+    n=$(find "$OC" -maxdepth 3 -newer "$MARKER" -type f 2>/dev/null | grep -v premigrate | wc -l | tr -d ' ')
+else
+    SINCE_DESC="近 ${DAYS} 天"
+    n=$(find "$OC" -maxdepth 3 -newermt "-${DAYS} days" -type f 2>/dev/null | grep -v premigrate | wc -l | tr -d ' ')
+fi
+tops=$(find "$OC" -maxdepth 3 ${SINCE_REF:+-newer "$SINCE_REF"} ${SINCE_REF:--newermt "-${DAYS} days"} -type f 2>/dev/null \
     | grep -v premigrate | sed "s|$OC/||;s|/.*||" | sort | uniq -c | sort -rn \
     | head -3 | awk '{printf "%s(%s) ",$2,$1}')
-add "近 ${DAYS} 天写入" "$([ "$n" -gt 0 ] && echo 1 || echo 0)" "$n 个文件 ${tops}" \
+add "${SINCE_DESC}写入" "$([ "$n" -gt 0 ] && echo 1 || echo 0)" "$n 个文件 ${tops}" \
     "仍有写入说明还有活跃依赖"
 
 # ── 5. 新家数据是否齐全（删旧根不能丢东西）──
