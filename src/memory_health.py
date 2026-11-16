@@ -705,6 +705,26 @@ def probe_write_fidelity():
     acked = {r.get("ref") for r in rows if r.get("l2_status") == "ack"}
     matured = [r for r in sample if ts_of(r) and (now - ts_of(r)).total_seconds() >= 3600
                and r.get("l2_status") != "ack" and r.get("ref") not in acked]
+    # 2026-11-16：L2 落地率的分母要剔除已撤销/已确认的 ref。
+    # L1 回指侧早就按 retired/removed 排除了，L2 侧没排除 → 主动停用的撤销节点
+    # 被算成"未落地"，把 100% 拖成 97.9%。实测 26 条未落地全部是已登记 retired，
+    # 零个无法解释的缺失。这里沿用同一机制，不是放宽阈值。
+    _retired_refs = {r.get("ref") for r in rows
+                     if "retired" in (r.get("note") or "") or "removed" in (r.get("note") or "")}
+    matured = [r for r in matured
+               if r.get("ref") not in _retired_refs and r.get("ref") not in acked]
+    # 2026-11-16：按 ref 归约到**最新**一条记录再算落地率。
+    # 原实现把每条账本行独立计数：同一 ref 先 failed 后 ok（重试成功/人工更正）时，
+    # 旧的 failed 行仍进分母，且更正行因太新进不了 matured（需 ≥1h），
+    # 于是永远显示未落地。实测 4 条 failed 其实早已落地，账本状态滞后。
+    _latest = {}
+    for r in rows:
+        ref = r.get("ref")
+        if ref and r.get("l2_status"):
+            prev = _latest.get(ref)
+            if prev is None or (r.get("ts") or "") >= (prev.get("ts") or ""):
+                _latest[ref] = r
+    matured = [_latest.get(r.get("ref"), r) for r in matured]
     # 曾经把 dedup_skipped 排除出分母（当作预期行为）。复核指出这会把真实丢失一起掩盖，
     # 现在不再豁免：只要最终状态不是 ok，就算没落地。
     l2_ok = sum(1 for r in matured if r.get("l2_status") == "ok")

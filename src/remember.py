@@ -101,6 +101,38 @@ def daily_log_path(date_str: str = None) -> Path:
 # 步骤 ①：同步写 daily log（SoT，必成）
 # ============================================================
 
+def find_l1_duplicate(content: str) -> dict | None:
+    """L1 事实级查重：当日 SoT 里是否已有**同内容**条目（忽略时间戳与 tags）。
+
+    起因（2026-11-16 实测）：活跃会话文件每追加一次，memory_capture 的
+    file_hash(mtime:size) 就变 → 整段对话被重新提取 → 同一事实反复写 L1。
+    实测今早 45 秒内同一条内容写了 13 次；L2 服务端按相似度去重后回查为 0，
+    核验便判「缺失」→ 假红灯。此处在写 L1 前挡掉完全同文本的重复。
+
+    注意：_line_sha() 哈希的是**整行含时间戳**，故不能直接用它比对；
+    这里只对 content 做归一化比较，返回既有行的坐标与整行 sha（与账本口径一致）。
+    """
+    try:
+        lp = daily_log_path()
+        if not lp.exists():
+            return None
+        target = norm_line(content)
+        if not target:
+            return None
+        lines = lp.read_text(encoding="utf-8").splitlines()
+        pat = re.compile(r"^-\s+\S+(?:\s+\[[^\]]*\])?\s+(.*)$")
+        for i in range(len(lines) - 1, -1, -1):
+            m = pat.match(lines[i])
+            if not m:
+                continue
+            if norm_line(m.group(1)) == target:
+                return {"ref": f"{lp.name}:{i + 1}", "line": i + 1,
+                        "file": lp.name, "sha": _line_sha(lines[i]), "text": lines[i]}
+    except Exception:      # 查重失败不阻断写入（宁可重复，不可丢）
+        return None
+    return None
+
+
 def append_daily_log_ex(content: str, tags: list[str] = None) -> dict | None:
     """追加到今日 daily log 并返回可回溯坐标。
 
@@ -352,6 +384,21 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
         "dup_candidates": None,
     }
     
+    # ⓪ L1 事实级去重（2026-11-16）——一键回退：MEMORY_L1_DEDUP_OFF=1
+    #    同内容已在当日 SoT → 不重复写、不重复送 L2；账本记 dup_l1_skipped
+    #    （该行 l2_session_id 留空，故不会被 write_fidelity 抽样，不产生假缺失）
+    if os.environ.get("MEMORY_L1_DEDUP_OFF") != "1":
+        prev = find_l1_duplicate(content)
+        if prev:
+            results["daily_log"] = True          # 内容确实在 L1，视为已落地
+            results["source_line"] = prev["ref"]
+            results["sha"] = prev["sha"]
+            results["l1_dedup_skipped"] = True
+            results["l2_status"] = "dup_l1_skipped"
+            append_ledger(prev["ref"], prev["sha"], "dup_l1_skipped", content=content)
+            print(f"[remember] ⏭️ L1 已有同内容，跳过重复写入（{prev['ref']}）")
+            return results
+
     # ① daily log（必成，失败即报错）—— P1：同时拿到 (ref, line, sha)
     loc = append_daily_log_ex(content, tags)
     results["daily_log"] = loc is not None
