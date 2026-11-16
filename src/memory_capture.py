@@ -722,6 +722,24 @@ _DEGEN = re.compile(r"(.{2,6})\1{3,}")          # 同一 2-6 字片段连续重�
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 _ASCII_WORD = re.compile(r"[A-Za-z]{3,}")
 
+# 2026-11-16 补 ×2 缺口。拿历史真实污染（清理前备份的 135 条原文）当负控实测：
+# 旧闸门只拦 107/135，漏掉的 28 条全是「多层多层」型 —— 纯中文 2 字片段重复 2 次。
+#
+# 为什么不能简单把 {3,} 降成 {1,}：实测 ≥2 命中 19 行**全是误报** ——
+# 人名 ChenFeiFei、域名 qichacha、路径 bin/bin、列表分隔「、bailian」。
+# 长片段（7-40 字）×2 也全是误报：/memory/memory、StartLux-Decision/StartLux-Decision。
+# 区别在于：真污染的重复单元是**纯中文**，误报都含 ASCII 或分隔符。
+# 故新增独立规则：纯中文 2 字 ×2，且排除合法中文重叠词。
+_DEGEN_CJK2 = re.compile(r"([\u4e00-\u9fff]{2})\1")
+# 合法重叠：动词重叠（研究研究）与动词+名词碰撞（提交·提交记录）。
+# 这是**防误拦合法事实**，不是为了让闸门变绿；污染覆盖率仍为 28/28。
+# 局限：白名单是有限词表，遇到新的合法碰撞需补录（已写进测试说明）。
+_DEGEN_ALLOW = frozenset({
+    "研究研究", "讨论讨论", "商量商量", "考虑考虑", "检查检查", "整理整理",
+    "调整调整", "优化优化", "确认确认", "沟通沟通", "核对核对", "梳理梳理",
+    "提交提交",   # 「提交提交记录为 874f22c」动词+名词，实测语料中的合法用法
+})
+
 
 def is_degenerate(text: str) -> bool:
     """重复退化文本判定。宁可漏拦，不可误拦。
@@ -738,6 +756,15 @@ def is_degenerate(text: str) -> bool:
     for mo in _DEGEN.finditer(t):
         unit = mo.group(1)
         if _CJK.search(unit) or _ASCII_WORD.search(unit):
+            return True
+    # ×2 缺口：纯中文 2 字重复（「多层多层」），排除合法重叠词
+    for mo in _DEGEN_CJK2.finditer(t):
+        u = mo.group(1)
+        # AAAA 型（单元本身同字，如「哈哈」→哈哈哈哈）是笑声/拟声，合法。
+        # 真污染是**异字**词重复（多层多层）。用结构判据而非逐词白名单。
+        if u[0] == u[1]:
+            continue
+        if u * 2 not in _DEGEN_ALLOW:
             return True
     return False
 

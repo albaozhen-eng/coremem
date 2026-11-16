@@ -58,6 +58,25 @@ check("系统已修复因共享页签导航导致的sender会话查找失败问�
 check("短", False, "过短不判（避免误拦）")
 check("会议定在明天下午三点，参会人有张三李四王五", False, "含列举但非退化")
 
+print("=== ×2 缺口：历史真实污染样本（负控，取自清理前备份原文）===")
+# 旧闸门只拦 107/135，漏掉的 28 条全是这个形态。若删掉 ×2 规则，这里必红。
+for _t in ["用户确认三层漏斗结构需支持多层多层过滤",
+           "用户确认三层漏斗结构需支持多层多层置信度管理",
+           "用户确认三层漏斗结构需支持多层多层错误处理"]:
+    check(_t, True, "纯中文异字词 ×2（真污染形态）")
+
+print("=== 误报陷阱：降阈值会拦掉的合法内容（实测语料）===")
+# 这些是把 {3,} 直接降成 {1,} 时的真实误报，必须全部放过
+check("切换后新增可登录人员为Ada、Candice、ChenFeiFei，无人员失去登录权限", False, "人名 ChenFeiFei")
+check("企查查接口通过QM服务器nginx代理至api.qichacha.com，港机白名单配置疑似历史遗留", False, "域名 qichacha")
+check("pnpm 12.5.1 因 PNPM_HOME 配置导致全局 bin 目录推导为 ~/.npm-global/bin/bin 从而不在 PATH 中", False, "路径 bin/bin")
+check("系统评审报告落盘~/.openclaw/workspace/memory/memory-system-review-20260911.md", False, "路径 memory/memory")
+check("模型治理在册provider包括deepseek、ollama、bailian、bailian-kimi、arbiteros、ds4、omlx、scnet、scnet-tp。", False, "列举分隔 、bailian")
+check("模型权重文件位于~/StartLux-Decision/StartLux-Decision-4B-Q8_0.gguf，大小4.48GB", False, "长片段 ×2 路径")
+check("提交审计成果，提交提交记录为 874f22c", False, "动词+名词碰撞（白名单）")
+check("用户说哈哈哈哈这个有意思", False, "AAAA 型笑声（结构判据放过）")
+check("用户说要研究研究这个方案再定", False, "合法动词重叠")
+
 print()
 print("全部通过" if not FAILS else f"失败 {len(FAILS)}: {FAILS}")
 sys.exit(1 if FAILS else 0)
