@@ -719,14 +719,27 @@ CRED_KV = re.compile(
 # 成因之一是**自我污染回路**：排查时打印的垃圾行进入会话记录，capture 又把它提取回 L1。
 # 不管源头是模型退化还是回路，事实写入前都该有确定性闸门 —— 不能指望上游自觉。
 _DEGEN = re.compile(r"(.{2,6})\1{3,}")          # 同一 2-6 字片段连续重复 ≥4 次
+_CJK = re.compile(r"[\u4e00-\u9fff]")
+_ASCII_WORD = re.compile(r"[A-Za-z]{3,}")
 
 
 def is_degenerate(text: str) -> bool:
-    """重复退化文本判定。宁可漏拦，不可误拦正常叠词（如「哈哈哈」只 3 次不触发）。"""
+    """重复退化文本判定。宁可漏拦，不可误拦。
+
+    2026-11-16 收紧：初版纯用重复正则，在 L2 清理时误判了 5 个**合法**节点——
+    形如 `0x00000000` 的十六进制偏移、以及英文长句里的重复片段。
+    若直接拿它当写入闸门，会把合法技术事实拦掉。
+    现在要求重复片段**含中文**（本次污染形态），或含 ≥3 字母的英文词（真英文退化）。
+    纯数字/十六进制串不算退化。
+    """
     t = (text or "").strip()
     if len(t) < 12:
         return False
-    return bool(_DEGEN.search(t))
+    for mo in _DEGEN.finditer(t):
+        unit = mo.group(1)
+        if _CJK.search(unit) or _ASCII_WORD.search(unit):
+            return True
+    return False
 
 
 def redact_credentials(text: str) -> tuple[str, bool]:

@@ -43,6 +43,14 @@ check("用户确认三层漏斗结构需支持多层多层多层多层错误处�
 check("测试测试测试测试测试测试测试", True, "整词重复")
 check("系统状态正常正常正常正常正常正常", True, "尾部退化")
 
+print("=== 不该拦：曾误判的合法技术文本（2026-11-16 收紧）===")
+check("The binary file begins with the magic bytes GGUF at offset 0x00000000, identifying 0x00000000",
+      False, "十六进制偏移（清理 L2 时曾误判 5 个合法节点）")
+check("哈希值 0000000000000000 与校验位 0000000000000000", False, "纯数字重复不算退化")
+
+print("=== 该拦：英文词退化 ===")
+check("the the the the the model output", True, "英文词连续重复")
+
 print("=== 不该拦：正常事实与正常叠词 ===")
 check("用户决定改用中文嵌入模型 bge-small-zh-v1.5", False, "普通决策事实")
 check("用户说哈哈哈哈这个有意思", False, "正常叠词（3 次重复不触发）")
