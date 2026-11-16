@@ -44,6 +44,12 @@ MEMORY_DIR = Path(os.environ.get("MEM_DAILY_NOTES_DIR", Path.home() / ".coremem/
 L3 = Path(os.environ.get("MEM_MEMORY_MD", Path.home() / ".coremem/MEMORY.md"))
 LLM_BASE = os.environ.get("MEM_LLM_BASE_URL", "http://127.0.0.1:9999/v1")
 LLM_MODEL = os.environ.get("MEM_LLM_MODEL", "Qwen3.8-Flash-Next-oQ4e-mtp")
+# 2026-11-16：与 capture 同源的问题——Flash 被 oMLX 内存守卫拒（HTTP 400，
+# max_context=131072 → prefill 需 122GB）。本脚本原来单模型硬编码、零兜底，
+# 一个簇撞 400 就整轮抛异常。改为模型级兜底：主力失败自动换小模型。
+# 实测同机 Qwen3-8B-mlx-4bit 返回 200；归纳只需 ~6000 字，8B 足够。
+LLM_FALLBACKS = [m.strip() for m in os.environ.get(
+    "MEM_LLM_FALLBACKS", "Qwen3-8B-mlx-4bit").split(",") if m.strip()]
 EMBED_BASE = os.environ.get("MEM_EMBED_BASE_URL", "http://127.0.0.1:9999/v1")
 EMBED_MODEL = os.environ.get("MEM_EMBED_MODEL", "Qwen3-Embedding-0.6B")
 
@@ -151,18 +157,31 @@ PROMPT = """下面是从记忆里取出的若干条事实。请判断：它们�
 
 def ask_llm(cluster_facts: list[Fact]) -> dict:
     lines = "\n".join(f"- [{f.ref}] ({f.day}) {f.text}" for f in cluster_facts)
-    body = json.dumps({
-        "model": LLM_MODEL,
-        "messages": [{"role": "user", "content": PROMPT.format(facts=lines)}],
-        "max_tokens": 500,
-        "temperature": 0,
-        "chat_template_kwargs": {"enable_thinking": False},
-    }).encode()
-    req = urllib.request.Request(f"{LLM_BASE}/chat/completions", data=body,
-                                headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=180) as r:
-        d = json.load(r)
-    raw = (d["choices"][0]["message"].get("content") or "").strip()
+    raw = None
+    last_err = None
+    for _model in [LLM_MODEL] + LLM_FALLBACKS:
+        body = json.dumps({
+            "model": _model,
+            "messages": [{"role": "user", "content": PROMPT.format(facts=lines)}],
+            "max_tokens": 500,
+            "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }).encode()
+        req = urllib.request.Request(f"{LLM_BASE}/chat/completions", data=body,
+                                    headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                d = json.load(r)
+            raw = (d["choices"][0]["message"].get("content") or "").strip()
+            break
+        except Exception as e:                      # 400/超时/空回复都换下一个模型
+            last_err = e
+            print(f"  ⚠️ 归纳模型 {_model} 失败（{type(e).__name__}），换下一个", file=sys.stderr)
+    if raw is None:
+        # 全链失败：返回 none 让该簇被闸门拒，而不是抛异常中断整轮
+        print(f"  🔴 归纳全模型失败：{last_err}", file=sys.stderr)
+        return {"kind": "none", "rule": "", "subject": "", "evidence": [],
+                "_error": str(last_err)[:120]}
     raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.M).strip()
     try:
         return json.loads(raw)
