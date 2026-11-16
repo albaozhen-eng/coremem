@@ -714,6 +714,21 @@ CRED_KV = re.compile(
     r"((?:api[_-]?key|access[_-]?token|secret)\s*[:：=]\s*['\"]?)([A-Za-z0-9_\-\.]{12,})", re.IGNORECASE)
 
 
+# 2026-11-16：退化输出闸门。实测 11-16 有 107 条形如
+# 「用户确认三层漏斗结构需支持多层多层多层多层错误处理」的重复文本被当成事实写进 L1。
+# 成因之一是**自我污染回路**：排查时打印的垃圾行进入会话记录，capture 又把它提取回 L1。
+# 不管源头是模型退化还是回路，事实写入前都该有确定性闸门 —— 不能指望上游自觉。
+_DEGEN = re.compile(r"(.{2,6})\1{3,}")          # 同一 2-6 字片段连续重复 ≥4 次
+
+
+def is_degenerate(text: str) -> bool:
+    """重复退化文本判定。宁可漏拦，不可误拦正常叠词（如「哈哈哈」只 3 次不触发）。"""
+    t = (text or "").strip()
+    if len(t) < 12:
+        return False
+    return bool(_DEGEN.search(t))
+
+
 def redact_credentials(text: str) -> tuple[str, bool]:
     """返回 (脱敏后文本, 是否发生脱敏)。只抹凭据值，保留前缀便于追溯。"""
     redacted = False
@@ -880,6 +895,10 @@ def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_se
         
         for fact in facts:
             text = fact["text"] if isinstance(fact, dict) else fact
+            # 退化闸门：重复退化文本不入记忆（2026-11-16）
+            if is_degenerate(text):
+                print(f"  🚫 退化输出已拦截: {text[:50]}")
+                continue
             # 凭据闸门：密码/key/token 不入记忆（2026-11-11 审计）
             text, was_redacted = redact_credentials(text)
             if was_redacted:
