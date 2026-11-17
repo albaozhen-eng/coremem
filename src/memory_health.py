@@ -1092,10 +1092,12 @@ def main():
         ("throughput", probe_throughput),
     ]
     checks = []
+    _crashed = []
     for _cid, _fn in _probes:
         try:
             checks.append(_fn())
         except Exception as _e:  # noqa: BLE001
+            _crashed.append(_cid)
             checks.append({"id": _cid, "label": f"{_cid}（探针自身异常）", "level": "red",
                            "value": None, "unit": "", "warn_at": None, "red_at": None,
                            "detail": f"探针抛出 {type(_e).__name__}: {_e}"[:180]})
@@ -1117,57 +1119,42 @@ def main():
         "line": line,
         "checks": checks,
     }
-    # 2026-11-11 审计 P0-3：RED/YELLOW 必须告警，不能只写盘。
+    # 2026-11-17 删除主动推送通道（Brian 批准；四模型独立复核一致判定该删）。
     #
-    # 2026-11-17 修告警风暴。原注释写「health 每日 9:00 跑一次 → 每天至多一条，
-    # 无需额外去重」，但 launchd 实际是 StartInterval=900（每 15 分钟）。
-    # 假设失效后没人回来加去重 → 持续非绿时每天 96 条，实测 11-16 发了 113 条。
+    # 删的理由（复核原话）：单用户无值班无 SLA，推送的准入条件一条都不满足；
+    # 500 条假红被忽略 10.4 天，被忽略的监控比没有监控更糟；
+    # L2 是可重建投影，「你不会给一个 stale cache 发 page，你会 rebuild 它」；
+    # 用跨公网第三方 IM 报告 127.0.0.1 服务状态，通道自己不受监控 ——
+    # token 过期/限流时「没消息」与「一切正常」长得一样。
     #
-    # 去重策略（**不是让告警消失**）：
-    #   状态变化（含恢复 green）→ 立即发，闭环可见
-    #   状态相同 → 最多每 REAlert 小时提醒一次（默认 6h → 每天 ≤4 条）
-    #   RED 不受冷却限制升级：yellow→red 属状态变化，立即发
-    # 冷却窗口可用 MEM_HEALTH_REALERT_H 调整；设 0 则每轮都发（旧行为）。
-    alert = "skipped"
-    _realert_h = float(os.environ.get("MEM_HEALTH_REALERT_H", "6"))
-    _state_f = OUT_DIR / ".alert-state.json"
-    try:
-        _prev = json.loads(_state_f.read_text()) if _state_f.exists() else {}
-    except (OSError, ValueError):
-        _prev = {}
-    _now_ts = datetime.now().astimezone()
-    _changed = _prev.get("overall") != overall
-    _due = True
-    if not _changed and _realert_h > 0:
+    # 一并删掉我 11-17 早上加的 6h 去重与 MEM_HEALTH_REALERT_H：
+    # 复核指出那是给该删的东西打补丁，且把已证明有害的高噪音开关留在生产路径。
+    #
+    # 替代不是「静默即健康」，而是 fail-closed 的成功戳 + 持久未决集合：
+    #   只有**全部探针都跑完并写出结果**才写戳；崩溃/超时 → 没有新戳 → 使用点显示失活。
+    #   未决问题由 probe_unresolved 扫全量账本给出具体 ref，不因窗口滑走而消失。
+    alert = "no_push_channel"
+    stamp = {
+        "completed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "overall": overall,
+        "probes_run": len(checks),
+    }
+    # 2026-11-17：有探针崩溃就**不写成功戳**。
+    # 契约是「检查器崩溃 = 没有新戳 = 使用点判失活」，不是「崩溃也声称对账完成」。
+    # 这一条是 tests/test_no_push_channel.py 的负控抓出来的：
+    # 初版虽然把崩溃探针标红（overall=red，没假绿），但戳仍照写，
+    # 使用点若只看戳就会误判为「最近对账成功过」。
+    if _crashed:
+        print(f"[health] {len(_crashed)} 个探针崩溃，不写成功戳：{_crashed}", file=sys.stderr)
+    else:
         try:
-            _last = datetime.fromisoformat(_prev.get("sent_at", ""))
-            _due = (_now_ts - _last).total_seconds() >= _realert_h * 3600
-        except (ValueError, TypeError):
-            _due = True
-    # green 只在「由非绿恢复」时发一次；一直绿则不发
-    _should = (overall != "green" and (_changed or _due)) or (overall == "green" and _changed and _prev)
-    if _should:
-        if os.environ.get("MEM_HEALTH_NOTIFY", "1") == "0":
-            alert = "disabled"
-        else:
-            try:
-                import notify
-                _title = f"记忆系统 {overall.upper()}" + ("" if _changed else "（持续）")
-                ok = notify.send(line, title=_title)
-                alert = "sent" if ok else "api_rejected"
-                if ok:
-                    try:
-                        OUT_DIR.mkdir(parents=True, exist_ok=True)
-                        _state_f.write_text(json.dumps(
-                            {"overall": overall, "sent_at": _now_ts.isoformat(timespec="seconds")},
-                            ensure_ascii=False))
-                    except OSError:
-                        pass
-            except Exception as e:  # noqa: BLE001
-                alert = f"failed: {e}"[:200]
-                print(f"[health] 告警发送失败：{e}", file=sys.stderr)
-    elif overall != "green":
-        alert = "throttled"
+            OUT_DIR.mkdir(parents=True, exist_ok=True)
+            _sp = OUT_DIR / ".reconcile-stamp.json"
+            _tmp = _sp.with_suffix(".tmp")
+            _tmp.write_text(json.dumps(stamp, ensure_ascii=False) + "\n")
+            os.replace(_tmp, _sp)
+        except OSError as e:
+            print(f"[health] 成功戳写盘失败：{e}", file=sys.stderr)
     payload["alert"] = alert
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     tmp = OUT.with_suffix(".tmp")
