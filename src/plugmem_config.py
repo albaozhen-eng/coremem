@@ -51,7 +51,16 @@ def plugmem_cfg():
 # GET /api/v1/graphs/{gid}/sessions/{session_id} 会返回该 session 实际插入的节点数，
 # 这是**可靠且廉价**的存在性判据（不像 search，那个是相关性排序、不是子串匹配）。
 def session_status(session_id, timeout=10):
-    """返回 (count, error)。count=0 表示确实没落地；None 表示查不到/出错。"""
+    """返回 (count, error)。count=0 表示确实没落地；None 表示查不到/出错。
+
+    ⚠️ 2026-11-17 教训：**判断某条事实是否已在 L2，只能用本函数（/sessions/<sid>）。**
+    不要用 `/nodes?node_type=semantic` 列表去扫 session_id ——
+    该端点**不返回 session_id**（实测字段只有 credibility / is_active /
+    semantic_id / semantic_memory / tags / time）。
+    我据此扫了 74085 个节点得出「5 条全缺失」，实际 5 条**早已落地**，
+    账本 failed 只是状态滞后。若当时直接补写就会造 5 个重复节点；
+    是「写前二次回查」拦住的。存在性判断必须走权威端点，不能靠列表字段猜。
+    """
     import json as _json
     import urllib.parse as _parse
     import urllib.request as _req
