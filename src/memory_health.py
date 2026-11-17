@@ -654,6 +654,64 @@ def probe_kis():
                            warn_at=8, red_at=15)
 
 
+def probe_unresolved():
+    """持久未决集合（2026-11-17，四模型独立复核一致要求）。
+
+    为什么新增：probe_write_fidelity 的 sample 是**近 24h 滚动窗口**，
+    任何超过 24h 的失败写入会**永久隐形**。实测账本里 5 条最新状态仍为 failed
+    （10-30 / 11-15 / 11-16），窗口滑过后探针显示 100% 绿 ——
+    这就是历史教训「告警自己消失」的活体重演。
+
+    本探针不用窗口、不用百分比，扫**全量账本**按 ref 归约到最新状态，分成两类：
+      data_loss     : L1 解析不到 或 sha 不符 → 事实源真丢，零容忍
+      index_pending : L1 已核验但 L2 状态非 ok → 索引待补，**不是数据丢失**
+    只有**正向核验通过**才移出集合；不因时间、不因后续成功写入、不因重启而消失。
+    """
+    rows = mo_common.read_jsonl(mo_common.LEDGER)
+    if not rows:
+        return mo_common.check("unresolved", "未决集合（全量账本）", "green", 0, "条",
+                               "账本尚无数据", record_only=True)
+    latest = {}
+    for r in rows:
+        ref = r.get("ref")
+        if ref and r.get("l2_status"):
+            prev = latest.get(ref)
+            if prev is None or (r.get("ts") or "") >= (prev.get("ts") or ""):
+                latest[ref] = r
+    retired = {r.get("ref") for r in rows
+               if "retired" in (r.get("note") or "") or "removed" in (r.get("note") or "")}
+    acked = {r.get("ref") for r in rows if r.get("l2_status") == "ack"}
+
+    data_loss, index_pending = [], []
+    for ref, r in latest.items():
+        if ref in retired or ref in acked:
+            continue
+        st = r.get("l2_status")
+        if st == "ok":
+            continue
+        line = mo_common.resolve(ref)
+        sha = r.get("sha")
+        verified = line is not None and ((not sha) or mo_common.line_sha(line) == sha)
+        if not verified:
+            # 连事实源都核验不了 → 真问题（dup_l1_skipped 查不到也归这里）
+            data_loss.append(ref)
+        elif st != "dup_l1_skipped":
+            # L1 安全但 L2 没落地 → 索引待补，与数据丢失分开计
+            index_pending.append(ref)
+
+    if data_loss:
+        return mo_common.check("unresolved", "未决集合（全量账本）", "red", len(data_loss), "条",
+                               f"事实源核验失败（真丢失）{len(data_loss)} 条：{sorted(data_loss)[:3]}"
+                               f"；索引待补 {len(index_pending)} 条")
+    detail = f"事实源核验失败 0 条；索引待补 {len(index_pending)} 条"
+    if index_pending:
+        detail += f"（L1 已核验，非数据丢失）：{sorted(index_pending)[:3]}"
+    # 索引待补不是数据丢失 → 记黄但不红；为空则绿
+    level = "yellow" if index_pending else "green"
+    return mo_common.check("unresolved", "未决集合（全量账本）", level,
+                           len(index_pending), "条", detail)
+
+
 def probe_write_fidelity():
     """P1-M1：写入保真（读 data/write_ledger.jsonl）。
 
@@ -738,6 +796,15 @@ def probe_write_fidelity():
             _seen_refs.add(_ref)
         _deduped.append(r)
     matured = _deduped
+    # 2026-11-17 复核（kimi-k3.1-pro）指出：按 ref 去重会**吞掉同 ref 不同 sha 的冲突**。
+    # 那不是重复，是同一锚点内容被改过 —— 必须暴露，不能被去重取最新掩盖。
+    # 实测当前 0 例，属补隐患而非修现存故障。
+    _shas_by_ref = {}
+    for r in rows:
+        _ref, _sha = r.get("ref"), r.get("sha")
+        if _ref and _sha:
+            _shas_by_ref.setdefault(_ref, set()).add(_sha)
+    sha_conflicts = sorted(k for k, v in _shas_by_ref.items() if len(v) > 1)
     # 曾经把 dedup_skipped 排除出分母（当作预期行为）。复核指出这会把真实丢失一起掩盖，
     # 现在不再豁免：只要最终状态不是 ok，就算没落地。
     # 2026-11-17：dup_l1_skipped 是 L1 去重**主动跳过**（事实已存在），不是丢数据。
@@ -759,6 +826,11 @@ def probe_write_fidelity():
         return False
 
     l2_ok = sum(1 for r in matured if _l2_landed(r))
+    # 冲突优先于任何百分比：有冲突就不能是绿（防「99% 平均掉真问题」）
+    if sha_conflicts:
+        return mo_common.check(
+            "write_fidelity", "写入保真（L1 回指/L2 落地）", "red", len(sha_conflicts), "处",
+            f"同一 ref 出现不同 sha（内容被改过，不是重复）：{sha_conflicts[:3]}")
     l2_rate = round(100 * l2_ok / len(matured), 1) if matured else None
     l1_rate = round(100 * ok / checked, 1) if checked else None
 
@@ -1009,7 +1081,8 @@ def main():
         ("auto", probe_auto_retired), ("buffer", probe_buffer),
         ("consolidation", probe_consolidation), ("eval", probe_eval), ("backup", probe_backup),
         ("provenance", probe_provenance), ("sot_guard", probe_sot_guard),
-        ("write_fidelity", probe_write_fidelity), ("kis", probe_kis),
+        ("write_fidelity", probe_write_fidelity),
+        ("unresolved", probe_unresolved), ("kis", probe_kis),
         ("anchor_drift", probe_anchor_drift), ("dup_guard", probe_dup_guard),
         # 2026-11-11 审计 P2：cost 探针移除——recall_decisions.jsonl 无任何写入方，
         # 检索链路纯确定性零 LLM，探针不度量任何东西（假绿）。函数保留，
