@@ -725,9 +725,40 @@ def probe_write_fidelity():
             if prev is None or (r.get("ts") or "") >= (prev.get("ts") or ""):
                 _latest[ref] = r
     matured = [_latest.get(r.get("ref"), r) for r in matured]
+    # 2026-11-17：按 ref **去重**。上面只是把每行映射到最新记录，没有去重列表，
+    # 同一个 ref 的多行会被反复计数。实测 matured 472 行只含 307 个唯一 ref
+    # （dup_l1_skipped 165 行其实只有 10 个 ref），把落地率从 ~99% 压成 62.3%。
+    _seen_refs = set()
+    _deduped = []
+    for r in matured:
+        _ref = r.get("ref")
+        if _ref and _ref in _seen_refs:
+            continue
+        if _ref:
+            _seen_refs.add(_ref)
+        _deduped.append(r)
+    matured = _deduped
     # 曾经把 dedup_skipped 排除出分母（当作预期行为）。复核指出这会把真实丢失一起掩盖，
     # 现在不再豁免：只要最终状态不是 ok，就算没落地。
-    l2_ok = sum(1 for r in matured if r.get("l2_status") == "ok")
+    # 2026-11-17：dup_l1_skipped 是 L1 去重**主动跳过**（事实已存在），不是丢数据。
+    # 但不能直接豁免——早先复核指出豁免会把真实丢失一起掩盖。
+    # 折中：**回查验证**。该 ref 能解析回 L1 且 sha 一致 → 事实确实在库 → 计为已落地；
+    # 解析不到或 sha 不符 → 仍算未落地（真丢失照样报红）。
+    def _l2_landed(r):
+        st = r.get("l2_status")
+        if st == "ok":
+            return True
+        if st == "dup_l1_skipped":
+            ref, sha = r.get("ref"), r.get("sha")
+            if not ref:
+                return False
+            line = mo_common.resolve(ref)
+            if line is None:
+                return False
+            return (not sha) or mo_common.line_sha(line) == sha
+        return False
+
+    l2_ok = sum(1 for r in matured if _l2_landed(r))
     l2_rate = round(100 * l2_ok / len(matured), 1) if matured else None
     l1_rate = round(100 * ok / checked, 1) if checked else None
 
@@ -1014,20 +1045,56 @@ def main():
         "checks": checks,
     }
     # 2026-11-11 审计 P0-3：RED/YELLOW 必须告警，不能只写盘。
-    # health 每日 9:00 跑一次 → 每天至多一条，无需额外去重。
-    # 开关：MEM_HEALTH_NOTIFY=0 关闭；notify 配置缺失/发送失败只降级记录，不拖垮看板。
+    #
+    # 2026-11-17 修告警风暴。原注释写「health 每日 9:00 跑一次 → 每天至多一条，
+    # 无需额外去重」，但 launchd 实际是 StartInterval=900（每 15 分钟）。
+    # 假设失效后没人回来加去重 → 持续非绿时每天 96 条，实测 11-16 发了 113 条。
+    #
+    # 去重策略（**不是让告警消失**）：
+    #   状态变化（含恢复 green）→ 立即发，闭环可见
+    #   状态相同 → 最多每 REAlert 小时提醒一次（默认 6h → 每天 ≤4 条）
+    #   RED 不受冷却限制升级：yellow→red 属状态变化，立即发
+    # 冷却窗口可用 MEM_HEALTH_REALERT_H 调整；设 0 则每轮都发（旧行为）。
     alert = "skipped"
-    if overall != "green":
+    _realert_h = float(os.environ.get("MEM_HEALTH_REALERT_H", "6"))
+    _state_f = OUT_DIR / ".alert-state.json"
+    try:
+        _prev = json.loads(_state_f.read_text()) if _state_f.exists() else {}
+    except (OSError, ValueError):
+        _prev = {}
+    _now_ts = datetime.now().astimezone()
+    _changed = _prev.get("overall") != overall
+    _due = True
+    if not _changed and _realert_h > 0:
+        try:
+            _last = datetime.fromisoformat(_prev.get("sent_at", ""))
+            _due = (_now_ts - _last).total_seconds() >= _realert_h * 3600
+        except (ValueError, TypeError):
+            _due = True
+    # green 只在「由非绿恢复」时发一次；一直绿则不发
+    _should = (overall != "green" and (_changed or _due)) or (overall == "green" and _changed and _prev)
+    if _should:
         if os.environ.get("MEM_HEALTH_NOTIFY", "1") == "0":
             alert = "disabled"
         else:
             try:
                 import notify
-                ok = notify.send(line, title=f"记忆系统 {overall.upper()}")
+                _title = f"记忆系统 {overall.upper()}" + ("" if _changed else "（持续）")
+                ok = notify.send(line, title=_title)
                 alert = "sent" if ok else "api_rejected"
+                if ok:
+                    try:
+                        OUT_DIR.mkdir(parents=True, exist_ok=True)
+                        _state_f.write_text(json.dumps(
+                            {"overall": overall, "sent_at": _now_ts.isoformat(timespec="seconds")},
+                            ensure_ascii=False))
+                    except OSError:
+                        pass
             except Exception as e:  # noqa: BLE001
                 alert = f"failed: {e}"[:200]
                 print(f"[health] 告警发送失败：{e}", file=sys.stderr)
+    elif overall != "green":
+        alert = "throttled"
     payload["alert"] = alert
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     tmp = OUT.with_suffix(".tmp")
