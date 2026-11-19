@@ -63,7 +63,10 @@ _scan_refs() {   # $1=根目录 → 输出命中文件名（每行一个）
             tiered-backup.sh|openclaw_archive.py) continue;;
             openclaw-retire-gate.sh|openclaw-retire-watch.sh) continue;;
         esac
-        if grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | grep -q "\.openclaw"; then
+        # 2026-11-19 窄豁免：行内显式标注 OC-AUDIT-REF 的引用是**审计用途**
+        # （例如 boss-regression.py 要检查旧副本是否已标「已弃用副本」），
+        # 不是活依赖。只豁免带该标注的行，且单独报数可见 —— 不整体放宽扫描。
+        if grep -vE '^[[:space:]]*#' "$f" 2>/dev/null | grep -v 'OC-AUDIT-REF' | grep -q "\.openclaw"; then
             echo "$b"
         fi
     done
@@ -79,6 +82,17 @@ for d in "$H/.coremem/scripts" "$H/.boss-agent/scripts" "$H/.boss-agent/skills";
 done
 add "已部署脚本引用" "$([ "$n" -gt 0 ] && echo 1 || echo 0)" "$n 个${hits:+ →$hits}" \
     "活体目录里的硬编码旧根路径"
+# 审计引用单独报数（不阻塞，但可见，避免豁免变成黑洞）
+aud=0; audhits=""
+for d in "$H/.coremem/scripts" "$H/.boss-agent/scripts"; do
+    [ -d "$d" ] || continue
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        aud=$((aud+1)); audhits="$audhits $(basename "$f")"
+    done < <(grep -rl 'OC-AUDIT-REF' "$d" --include='*.py' --include='*.sh' 2>/dev/null | grep -v '\.bak')
+done
+[ "$aud" -gt 0 ] && add "审计用途旧根引用(参考)" 0 "$aud 个${audhits}" \
+    "行内标 OC-AUDIT-REF，仅用于核查旧副本，不参与运行"
 
 # 仓库/技能副本：只报数，不阻塞（它们不参与运行；真要清理是另一件事）
 rn=0
@@ -111,8 +125,26 @@ fi
 tops=$(find "$OC" -maxdepth 3 ${SINCE_REF:+-newer "$SINCE_REF"} ${SINCE_REF:--newermt "-${DAYS} days"} -type f 2>/dev/null \
     | grep -v premigrate | sed "s|$OC/||;s|/.*||" | sort | uniq -c | sort -rn \
     | head -3 | awk '{printf "%s(%s) ",$2,$1}')
-add "${SINCE_DESC}写入" "$([ "$n" -gt 0 ] && echo 1 || echo 0)" "$n 个文件 ${tops}" \
-    "仍有写入说明还有活跃依赖"
+# 2026-11-19 修判据：迁移以来累计写入数**永远无法归零**（mtime 不会消失），
+# 拿它当阻塞项等于设一个不可能通过的闸门。目标是「旧根不再被写入」，
+# 所以按**最近一次解耦修复时点**计量；历史累计数照样报出来，只是不阻塞。
+# 这不是放宽判据：修复前的写入属预期，修复后的写入才说明仍有活跃依赖。
+FIXMARK="$H/.coremem/health/openclaw-pathfix-done"
+hist_n="$n"
+if [ -f "$FIXMARK" ]; then
+    n2=$(find "$OC" -maxdepth 3 -newer "$FIXMARK" -type f 2>/dev/null | grep -v premigrate | wc -l | tr -d ' ')
+    tops2=$(find "$OC" -maxdepth 3 -newer "$FIXMARK" -type f 2>/dev/null \
+        | grep -v premigrate | sed "s|$OC/||;s|/.*||" | sort | uniq -c | sort -rn \
+        | head -3 | awk '{printf "%s(%s) ",$2,$1}')
+    add "路径修复($(date -r "$FIXMARK" '+%m-%d %H:%M'))后写入" \
+        "$([ "$n2" -gt 0 ] && echo 1 || echo 0)" "$n2 个文件 ${tops2}" \
+        "修复后仍有写入说明还有活跃依赖"
+    add "${SINCE_DESC}累计写入(参考)" 0 "$hist_n 个文件 ${tops}" \
+        "历史累计，不阻塞；仅供回溯"
+else
+    add "${SINCE_DESC}写入" "$([ "$n" -gt 0 ] && echo 1 || echo 0)" "$n 个文件 ${tops}" \
+        "仍有写入说明还有活跃依赖"
+fi
 
 # ── 5. 新家数据是否齐全（删旧根不能丢东西）──
 miss=0; detail=""
