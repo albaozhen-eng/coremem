@@ -74,11 +74,19 @@ else:
         check("再写 25 条成功后，旧 failed 仍在清单",
               TMPREF in str(c.get("detail")), "这条红了说明重演了「告警自己消失」")
 
-        print("=== 对照：窗口式探针会漏掉它（证明新探针不是多余）===")
+        print("=== 对照：两处机制的覆盖关系（2026-11-19 更新前提）===")
+        # 原断言是「write_fidelity 的 24h 窗口看不见旧失败」，用来证明本探针不多余。
+        # 2026-11-19 同步活体后发现：另一会话在 11-17 也给 write_fidelity 加了
+        # 全量账本固化（.unacked-l2-failures.json），它现在**也看得见**旧失败。
+        # 前提真的变了，故按事实改断言 —— 不是为了让测试变绿。
+        # 现状：两处机制功能重叠，都能兜住「告警自己消失」。重叠是维护负担，
+        # 已在 docs 记录待合并；但**不擅自删任一机制**（另一方成果需先理解）。
         c2 = mh.probe_write_fidelity()
-        check("write_fidelity(24h窗口) 看不见该旧失败",
-              TMPREF not in str(c2.get("detail")),
-              "若它也看得见，说明本测试的对照前提变了，需重新评估")
+        both = TMPREF in str(c2.get("detail"))
+        check("旧失败至少被一处机制看见（核心不变量）",
+              TMPREF in str(mh.probe_unresolved().get("detail")) or both)
+        print(f"    现状：write_fidelity {'也' if both else '不'}看得见 → "
+              f"{'两处重叠，待合并' if both else '仅 unresolved 覆盖'}")
 
         print("=== 正向核验通过才移出集合 ===")
         # 用一个真实存在且 sha 正确的 ref 追加 ok，应不在未决集合里

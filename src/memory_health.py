@@ -725,6 +725,35 @@ def probe_write_fidelity():
                                "write_ledger.jsonl 尚未产生（等下一次 remember.py 写入）",
                                record_only=True)
 
+    # ── 2026-11-17 Brian「都需要」：账本新鲜度闸 ────────────────────────
+    # 查明：~/.openclaw/data/write_ledger.jsonl（旧副本）末行停在 10-30，18 天无写入，
+    # 而探针抽样最后 N 条老记录 → 当然「全部落地」→ 假绿灯。
+    # 现行账本在 ~/.coremem/data/，本身活跃；但一旦写入链路断掉，
+    # 百分比仍会停在历史高位，看不出「已经不再写入」。故先验新鲜度再看比例。
+    def _last_ledger_ts(rs):
+        best = None
+        for r in rs:
+            try:
+                d = datetime.fromisoformat(str(r.get("ts") or ""))
+            except (ValueError, TypeError):
+                continue
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            if best is None or d > best:
+                best = d
+        return best
+    _lt = _last_ledger_ts(rows)
+    if _lt is None:
+        return mo_common.check("write_fidelity", "写入保真（L1 回指/L2 落地）", "red", None, "",
+                               f"账本无可解析时间戳（{mo_common.LEDGER}）→ 无法核验，视为异常")
+    _age_h = (datetime.now(_lt.tzinfo) - _lt).total_seconds() / 3600
+    if _age_h > 24:
+        return mo_common.check(
+            "write_fidelity", "写入保真（L1 回指/L2 落地）",
+            "red" if _age_h > 72 else "yellow", round(_age_h, 1), "小时",
+            f"账本已 {_age_h:.0f} 小时无新写入（末行 {_lt.strftime('%Y-%m-%d %H:%M')}）"
+            f"→ 百分比会停在历史高位造成假绿灯，先查写入链路是否断")
+
     def ts_of(r):
         """解析账本时间戳；无时区的历史行按本地时区处理，解析不了返回 None。
         （flush 曾写出过无时区的时间戳，与 remember 的行混在一起会做时间相减报错。）"""
@@ -824,6 +853,49 @@ def probe_write_fidelity():
                 return False
             return (not sha) or mo_common.line_sha(line) == sha
         return False
+
+    # ── 2026-11-17 Brian「要」：L2 真失败固化，不随窗口滑动自动消失 ────────
+    # 问题：探针只看最近 200 行 / 24h，历史 failed/missing 会滑出窗口 → 告警自己消失。
+    # 实测全量 41 条 failed/missing（多数无错误说明=静默失败），窗口内只剩 9 条，
+    # 报 100% 并不代表历史失败已解决。
+    # 做法照 dup_guard 的 unacked 机制：全量扫描累积，只有
+    #   ① 同 ref 后来出现 l2_status=ok 的行，或
+    #   ② 该 ref 有更晚的 retired/removed 行（--ack-missing 人工确认）
+    # 才移出集合。未确认数 >0 一律 red，优先于任何百分比。
+    L2STATE = OUT_DIR / ".unacked-l2-failures.json"
+    try:
+        _unl2 = json.loads(L2STATE.read_text()) if L2STATE.exists() else {}
+    except (OSError, ValueError):
+        _unl2 = {}
+    _latest_by_ref = {}
+    for r in rows:
+        _ref = r.get("ref")
+        if not _ref:
+            continue
+        _prev = _latest_by_ref.get(_ref)
+        if _prev is None or str(r.get("ts") or "") >= str(_prev.get("ts") or ""):
+            _latest_by_ref[_ref] = r
+    for _ref, r in _latest_by_ref.items():
+        _note = str(r.get("note") or "")
+        _retired = ("retired" in _note) or ("removed" in _note)
+        if _retired or r.get("l2_status") in ("ok", "ack"):
+            _unl2.pop(_ref, None)
+            continue
+        if r.get("l2_status") in ("failed", "missing") or (
+                r.get("l2_status") == "dup_l1_skipped" and not _l2_landed(r)):
+            _unl2[_ref] = {"status": r.get("l2_status"), "ts": r.get("ts", ""),
+                           "note": _note[:120]}
+    try:
+        L2STATE.write_text(json.dumps(_unl2, ensure_ascii=False, indent=1))
+    except OSError:
+        pass
+    if _unl2:
+        _sample = sorted(_unl2.items(), key=lambda kv: str(kv[1].get("ts") or ""), reverse=True)[:3]
+        _txt = "；".join(f"{k}({v.get('status')})" for k, v in _sample)
+        return mo_common.check(
+            "write_fidelity", "写入保真（L1 回指/L2 落地）", "red", len(_unl2), "条",
+            f"未确认的 L2 真失败累计 {len(_unl2)} 条（不随窗口消失）：{_txt}"
+            f"｜确认后用 --ack-missing <ref> 移出")
 
     l2_ok = sum(1 for r in matured if _l2_landed(r))
     # 冲突优先于任何百分比：有冲突就不能是绿（防「99% 平均掉真问题」）
