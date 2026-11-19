@@ -2,7 +2,12 @@
 """L2（PlugMem 语义图）每日快照
 - rsync 增量拷贝（排除 live sqlite）
 - sqlite3 在线备份 API 单独备份 chroma.sqlite3（保证一致）
-- 保留 7 份，更旧的自动清理（用 Python 删，避免 shell 通配误伤）
+- 保留份数由 MEM_SNAPSHOT_KEEP 控制，**默认 1**（2026-11-19 Brian 定「暂定只留一份」）
+- 清理用 Python 删，避免 shell 通配误伤
+- **安全闸**：只留一份的前提是那一份被证明可恢复。清理前先验证最新快照
+  （sqlite 完整性 + 节点数 + L1 额外源），验证不过则**一份都不删**。
+  理由：份数从 7 降到 1 后，一次坏写入当天就会污染唯一副本；
+  11-16 的 135 条污染与误删 2 份基线，都是靠多份历史才救回来的。
 输出：~/.coremem/backups/plugmem/<date>/
 """
 from __future__ import annotations
@@ -19,7 +24,9 @@ from pathlib import Path
 
 SRC = Path(os.environ.get("MEM_PLUGMEM_DATA") or (Path.home() / ".coremem/plugmem"))
 DEST = Path.home() / ".coremem/backups/plugmem"
-KEEP = 7
+# 2026-11-19：Brian 定「暂定只留一份」。原为 7。
+# 可用 MEM_SNAPSHOT_KEEP 随时调回（例如 =7 恢复一周滚动）。
+KEEP = max(1, int(os.environ.get("MEM_SNAPSHOT_KEEP", "1")))
 STAMP = datetime.now().strftime("%Y-%m-%d")
 
 # 2026-11-11 审计 P0-1：L1 每日笔记（SoT）、统一事实池、MEMORY.md、配置此前不在备份范围。
@@ -43,10 +50,57 @@ def run(cmd: list[str]) -> int:
     return subprocess.run(cmd, capture_output=True, text=True).returncode
 
 
+def verify_snapshot(d: Path) -> tuple[bool, str]:
+    """证明这份快照**可恢复**，而不只是「文件存在」。
+
+    2026-11-19：KEEP 降到 1 后这是唯一的回退副本，必须正向验证才允许删旧份。
+    检查项（任一不过即拒删）：
+      1 snapshot.json 可解析
+      2 chroma/chroma.sqlite3 存在且 PRAGMA integrity_check == ok
+      3 该库里有语义节点（空库不算可恢复）
+      4 L1 额外源 workspace 里有每日笔记（事实源在快照里）
+    """
+    try:
+        json.loads((d / "snapshot.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return False, f"snapshot.json 不可用：{type(e).__name__}"
+    db = d / "chroma" / "chroma.sqlite3"
+    if not db.exists():
+        return False, "缺 chroma.sqlite3"
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as con:
+            ic = con.execute("PRAGMA integrity_check").fetchone()
+            if not ic or str(ic[0]).lower() != "ok":
+                return False, f"integrity_check={ic}"
+            tables = {r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if "embeddings" not in tables:
+                return False, "库里没有 embeddings 表"
+            n = con.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            if n <= 0:
+                return False, "embeddings 为空"
+    except sqlite3.Error as e:
+        return False, f"sqlite 打不开：{e}"
+    ws = d / "workspace"
+    if not ws.is_dir() or not list(ws.glob("2026-*.md")):
+        return False, "快照里没有 L1 每日笔记"
+    return True, f"integrity=ok embeddings={n} L1笔记={len(list(ws.glob('2026-*.md')))}"
+
+
 def prune() -> list[str]:
-    removed = []
+    """删旧份。**先验证要保留的最新份可恢复**，不过则一份都不删。"""
     dirs = sorted([d for d in DEST.iterdir() if d.is_dir()]) if DEST.exists() else []
-    for d in dirs[:-KEEP] if len(dirs) > KEEP else []:
+    if len(dirs) <= KEEP:
+        return []
+    keepers = dirs[-KEEP:]
+    for k in keepers:
+        ok, why = verify_snapshot(k)
+        if not ok:
+            print(f"⚠️ 保留份 {k.name} 未通过可恢复验证（{why}）→ **不清理任何旧份**",
+                  file=sys.stderr)
+            return []
+    removed = []
+    for d in dirs[:-KEEP]:
         shutil.rmtree(d, ignore_errors=True)
         removed.append(d.name)
     return removed
