@@ -165,18 +165,29 @@ add "PlugMem 服务" "$([ "$ok" = 1 ] && echo 0 || echo 1)" "$([ "$ok" = 1 ] && 
 
 # 迁移过的任务：非 0 且不在"迁移前即失败"白名单里的，算阻塞
 KNOWN_BAD="com.user.mem0-daemon ai.boss.wechat-watch com.lealway.wecom-oauth com.jicheng.finance-ocr com.lealway.llama-tunnel com.lealway.wecom-tunnel com.lealway.kb-consistency com.lealway.omlx-server ai.pi.smart-router"
-bad=""; nbad=0
+bad=""; nbad=0; nrun=0; running=""
 for p in "$LA"/*.plist.bak-full* "$LA"/*.plist.bak-sweep* "$LA"/*.plist.bak-wd*; do
     [ -f "$p" ] || continue
     L=$(basename "$p" | sed 's/\.plist\.bak.*//')
-    rc=$(launchctl list 2>/dev/null | awk -v l="$L" '$3==l{print $2}')
-    [ -z "$rc" ] && continue
+    line=$(launchctl list 2>/dev/null | awk -v l="$L" '$3==l{print $1" "$2}')
+    [ -z "$line" ] && continue
+    pid="${line%% *}"; rc="${line##* }"
     [ "$rc" = "0" ] && continue
     case " $KNOWN_BAD " in *" $L "*) continue;; esac
-    nbad=$((nbad+1)); bad="$bad $L(rc=$rc)"
+    # 2026-11-19 修判据：last exit code 是**历史**记录，不代表当前健康。
+    # 实测 4 个 tunnel rc=255 来自 11-18 一次网络抖动，但此刻 state=running，
+    # 且端到端验过（本地 18086/19221 → HTTP 401 服务活着、8096 → 200、
+    # 远端 18089/18080 在听）。拿历史码当阻塞项会把已恢复的任务永远钉红。
+    # 现在：**在跑（PID 是数字）→ 只报参考不阻塞**；没跑且 rc≠0 才阻塞。
+    case "$pid" in
+        ''|'-') nbad=$((nbad+1)); bad="$bad $L(rc=$rc,未运行)";;
+        *) nrun=$((nrun+1)); running="$running $L(历史rc=$rc,在跑)";;
+    esac
 done
-add "迁移任务健康" "$([ "$nbad" -gt 0 ] && echo 1 || echo 0)" "${bad:-无新增失败}" \
-    "排除迁移前即存在的失败"
+add "迁移任务健康" "$([ "$nbad" -gt 0 ] && echo 1 || echo 0)" "${bad:-无当前失败}" \
+    "排除迁移前即失败；在跑的历史非0码不阻塞"
+[ "$nrun" -gt 0 ] && add "历史非0但在跑(参考)" 0 "$nrun 个${running}" \
+    "已恢复运行；历史退出码仅供回溯"
 
 echo
 if [ "$BLOCK" = "0" ]; then
