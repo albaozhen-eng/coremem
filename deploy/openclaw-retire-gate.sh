@@ -56,7 +56,7 @@ add "活跃 plist 引用" "$([ "$n" -gt 0 ] && echo 1 || echo 0)" "$n 个${hits:
 _scan_refs() {   # $1=根目录 → 输出命中文件名（每行一个）
     find "$1" -maxdepth 4 \( -name node_modules -o -name .git -o -name dist \
          -o -name '.backup*' -o -name '*.bak*' \) -prune -o \
-         \( -name '*.py' -o -name '*.sh' \) -type f -print 2>/dev/null |
+         \( -name '*.py' -o -name '*.sh' -o -name '*.md' \) -type f -print 2>/dev/null |
     while IFS= read -r f; do
         b=$(basename "$f")
         case "$b" in
@@ -73,7 +73,10 @@ _scan_refs() {   # $1=根目录 → 输出命中文件名（每行一个）
 }
 
 n=0; hits=""
-for d in "$H/.coremem/scripts" "$H/.boss-agent/scripts" "$H/.boss-agent/skills"; do
+# 2026-11-20 补扫 ~/.pi/agent/skills：原来只扫 boss-agent/skills，
+# 漏了 pi 技能目录 —— task-status-briefing 技能里写相对路径 workspace/data/...
+# 导致 agent 一直往旧根写决策册，闸门却报「已部署脚本引用 0」。
+for d in "$H/.coremem/scripts" "$H/.boss-agent/scripts" "$H/.boss-agent/skills" "$H/.pi/agent/skills"; do
     [ -d "$d" ] || continue
     while IFS= read -r b; do
         [ -n "$b" ] || continue
