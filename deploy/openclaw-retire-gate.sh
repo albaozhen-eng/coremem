@@ -120,13 +120,13 @@ MARKER="$H/.coremem/health/openclaw-migration-done"
 DAYS="${OC_RETIRE_QUIET_DAYS:-3}"
 if [ -f "$MARKER" ]; then
     SINCE_REF="$MARKER"; SINCE_DESC="自迁移完成($(date -r "$MARKER" '+%m-%d %H:%M'))"
-    n=$(find "$OC" -maxdepth 3 -newer "$MARKER" -type f 2>/dev/null | grep -v premigrate | wc -l | tr -d ' ')
+    n=$(find "$OC" -maxdepth 3 -newer "$MARKER" -type f 2>/dev/null | grep -vE 'premigrate|scripts\.prelink-' | wc -l | tr -d ' ')
 else
     SINCE_DESC="近 ${DAYS} 天"
-    n=$(find "$OC" -maxdepth 3 -newermt "-${DAYS} days" -type f 2>/dev/null | grep -v premigrate | wc -l | tr -d ' ')
+    n=$(find "$OC" -maxdepth 3 -newermt "-${DAYS} days" -type f 2>/dev/null | grep -vE 'premigrate|scripts\.prelink-' | wc -l | tr -d ' ')
 fi
 tops=$(find "$OC" -maxdepth 3 ${SINCE_REF:+-newer "$SINCE_REF"} ${SINCE_REF:--newermt "-${DAYS} days"} -type f 2>/dev/null \
-    | grep -v premigrate | sed "s|$OC/||;s|/.*||" | sort | uniq -c | sort -rn \
+    | grep -vE 'premigrate|scripts\.prelink-' | sed "s|$OC/||;s|/.*||" | sort | uniq -c | sort -rn \
     | head -3 | awk '{printf "%s(%s) ",$2,$1}')
 # 2026-11-19 修判据：迁移以来累计写入数**永远无法归零**（mtime 不会消失），
 # 拿它当阻塞项等于设一个不可能通过的闸门。目标是「旧根不再被写入」，
@@ -135,9 +135,9 @@ tops=$(find "$OC" -maxdepth 3 ${SINCE_REF:+-newer "$SINCE_REF"} ${SINCE_REF:--ne
 FIXMARK="$H/.coremem/health/openclaw-pathfix-done"
 hist_n="$n"
 if [ -f "$FIXMARK" ]; then
-    n2=$(find "$OC" -maxdepth 3 -newer "$FIXMARK" -type f 2>/dev/null | grep -v premigrate | wc -l | tr -d ' ')
+    n2=$(find "$OC" -maxdepth 3 -newer "$FIXMARK" -type f 2>/dev/null | grep -vE 'premigrate|scripts\.prelink-' | wc -l | tr -d ' ')
     tops2=$(find "$OC" -maxdepth 3 -newer "$FIXMARK" -type f 2>/dev/null \
-        | grep -v premigrate | sed "s|$OC/||;s|/.*||" | sort | uniq -c | sort -rn \
+        | grep -vE 'premigrate|scripts\.prelink-' | sed "s|$OC/||;s|/.*||" | sort | uniq -c | sort -rn \
         | head -3 | awk '{printf "%s(%s) ",$2,$1}')
     add "路径修复($(date -r "$FIXMARK" '+%m-%d %H:%M'))后写入" \
         "$([ "$n2" -gt 0 ] && echo 1 || echo 0)" "$n2 个文件 ${tops2}" \
