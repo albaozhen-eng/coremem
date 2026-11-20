@@ -168,7 +168,7 @@ add "PlugMem 服务" "$([ "$ok" = 1 ] && echo 0 || echo 1)" "$([ "$ok" = 1 ] && 
 
 # 迁移过的任务：非 0 且不在"迁移前即失败"白名单里的，算阻塞
 KNOWN_BAD="com.user.mem0-daemon ai.boss.wechat-watch com.lealway.wecom-oauth com.jicheng.finance-ocr com.lealway.llama-tunnel com.lealway.wecom-tunnel com.lealway.kb-consistency com.lealway.omlx-server ai.pi.smart-router"
-bad=""; nbad=0; nrun=0; running=""
+bad=""; nbad=0; nrun=0; running=""; nbiz=0; biz=""
 for p in "$LA"/*.plist.bak-full* "$LA"/*.plist.bak-sweep* "$LA"/*.plist.bak-wd*; do
     [ -f "$p" ] || continue
     L=$(basename "$p" | sed 's/\.plist\.bak.*//')
@@ -183,7 +183,31 @@ for p in "$LA"/*.plist.bak-full* "$LA"/*.plist.bak-sweep* "$LA"/*.plist.bak-wd*;
     # 远端 18089/18080 在听）。拿历史码当阻塞项会把已恢复的任务永远钉红。
     # 现在：**在跑（PID 是数字）→ 只报参考不阻塞**；没跑且 rc≠0 才阻塞。
     case "$pid" in
-        ''|'-') nbad=$((nbad+1)); bad="$bad $L(rc=$rc,未运行)";;
+        ''|'-')
+            # 2026-11-20 再修判据：rc≠0 有两种完全不同的含义 ——
+            #   ① 迁移把任务搞坏了（Traceback / rc=127 找不到文件 / 路径错）→ 该阻塞
+            #   ② 任务跑完了、如实报告「业务不健康」→ **不是迁移问题**
+            # 实测 sender-health rc=1 是 render() 的健康判定（昨日成功率 43/163=26%），
+            # 它正确完成并打印了报告；把它当迁移故障是又一次「代理信号代替真判据」。
+            # 判据：看日志有无崩溃特征，而不是只看退出码。
+            _log=$(launchctl print "gui/$(id -u)/$L" 2>/dev/null \
+                   | awk '/stdout path|stderr path/{print $NF; exit}')
+            _crash=0
+            if [ "$rc" = "127" ] || [ "$rc" = "126" ]; then
+                _crash=1     # 命令找不到/不可执行 = 典型迁移遗漏
+            elif [ -n "$_log" ] && [ -f "$_log" ]; then
+                if tail -40 "$_log" 2>/dev/null | grep -qE 'Traceback|No such file|not found|PermissionError|ModuleNotFound'; then
+                    _crash=1
+                fi
+            else
+                _crash=1     # 拿不到日志无法证明是业务判定 → 保守当阻塞
+            fi
+            if [ "$_crash" = "1" ]; then
+                nbad=$((nbad+1)); bad="$bad $L(rc=$rc,崩溃/配置)"
+            else
+                nbiz=$((nbiz+1)); biz="$biz $L(rc=$rc,业务判定)"
+            fi
+            ;;
         *) nrun=$((nrun+1)); running="$running $L(历史rc=$rc,在跑)";;
     esac
 done
@@ -191,6 +215,8 @@ add "迁移任务健康" "$([ "$nbad" -gt 0 ] && echo 1 || echo 0)" "${bad:-无�
     "排除迁移前即失败；在跑的历史非0码不阻塞"
 [ "$nrun" -gt 0 ] && add "历史非0但在跑(参考)" 0 "$nrun 个${running}" \
     "已恢复运行；历史退出码仅供回溯"
+[ "$nbiz" -gt 0 ] && add "非0但属业务判定(参考)" 0 "$nbiz 个${biz}" \
+    "任务正常完成并如实报告业务不健康，非迁移故障"
 
 echo
 if [ "$BLOCK" = "0" ]; then
