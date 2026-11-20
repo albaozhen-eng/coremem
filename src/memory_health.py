@@ -772,13 +772,22 @@ def probe_write_fidelity():
     checked = ok = 0
     bad = []
     retired = 0
+    # 2026-11-20 修：退役排除必须**按 ref**，不能只按行。
+    # 原实现只看当前行自身的 note，而 --ack-missing 追加的确认行 sha=""，
+    # 会在 `if not ref or not sha` 处先被跳过 → 原始写入行仍被校验；
+    # 而「就地标记 [已撤销]」是文档认可的合法改写（见 offsite_restore_drill.py），
+    # 内容变了 sha 必然变 → 合法撤销反被报成失配（实测 7 条自测样本撤销后 L1 回指 96.3%）。
+    # L2 侧早已按 _retired_refs 集合排除，这里沿用同一机制，不是放宽阈值。
+    _retired_refs_l1 = {r.get("ref") for r in rows
+                        if "retired" in (r.get("note") or "")
+                        or "removed" in (r.get("note") or "")}
     for r in sample[-200:]:
         ref, sha = r.get("ref"), r.get("sha")
         if not ref or not sha:
             continue
         # 维护性退役：只有维护流程（如清除误写样本）才允许打这个标记。
         # 单独计数、不当作失配 —— 否则探针会被一次清理永久钉在黄灯。
-        if "removed" in (r.get("note") or "") or "retired" in (r.get("note") or ""):
+        if ref in _retired_refs_l1:
             retired += 1
             continue
         checked += 1

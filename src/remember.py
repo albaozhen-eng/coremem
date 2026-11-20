@@ -101,6 +101,80 @@ def daily_log_path(date_str: str = None) -> Path:
 # 步骤 ①：同步写 daily log（SoT，必成）
 # ============================================================
 
+# ── 事实价值规则闸门（2026-11-20）──
+# 判据在 589 条真实事实上验证：命中 1 簇 47 条(8.0%)，尾部全为抽象泛词无实体/数字，
+# 59 条真实「用户指定/批准/决定/要求」全部保留 → 无误杀迹象。
+# 真决策的差异出现在中段实体名，公共前缀天然很短，故不会命中。
+GATE_MIN_PREFIX = int(os.environ.get("MEMORY_GATE_MIN_PREFIX", "10"))
+GATE_WARN_CLUSTER = int(os.environ.get("MEMORY_GATE_WARN_CLUSTER", "5"))
+GATE_BLOCK_CLUSTER = int(os.environ.get("MEMORY_GATE_BLOCK_CLUSTER", "8"))
+GATE_MAX_TAIL = int(os.environ.get("MEMORY_GATE_MAX_TAIL", "20"))
+GATE_LOG_DIR = Path.home() / ".coremem" / "logs" / "memory-gate"
+_RECEIPT_RE = re.compile(r"(事件：)?提交\s*[0-9a-f]{6,}\s*(并)?推送|^项目\s*\S+\s*提交版本\s*[0-9a-f]+\s*已推送")
+
+
+def _gate_log(content: str, reason: str, detail: str = ""):
+    """被拦内容留痕（可回查，防误杀）。与 memory_capture.gate_log 同目录同风格。"""
+    try:
+        GATE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        fp = GATE_LOG_DIR / f"{now().strftime('%Y-%m-%d')}.md"
+        with open(fp, "a", encoding="utf-8") as f:
+            f.write(f"\n## {now().strftime('%H:%M')} remember GATE（{reason}）\n"
+                    f"- 内容: {content[:300]}\n"
+                    + (f"- 依据: {detail}\n" if detail else ""))
+    except Exception:
+        pass
+
+
+def rule_gate(content: str) -> tuple[str, str, str]:
+    """返回 (裁决, 原因, 依据)。裁决 ∈ block / warn / pass。
+
+    只在**高置信**时 block；簇大小刚过阈值只 warn（保守：漏记不可逆，误放可清理）。
+    """
+    t = (content or "").strip()
+    if not t:
+        return "block", "empty", "空内容"
+    if t.startswith("[已撤销]"):
+        return "block", "revoked_placeholder", "清理占位行不应重新写入"
+    if _RECEIPT_RE.search(t):
+        return "block", "commit_receipt", "提交回执属临时状态，无长期价值"
+    # 退化模板簇：与当日已写入事实聚类
+    if len(t) < GATE_MIN_PREFIX:
+        return "pass", "", ""
+    try:
+        lp = daily_log_path()
+        if not lp.exists():
+            return "pass", "", ""
+        key = t[:GATE_MIN_PREFIX]
+        peers = [t]
+        pat = re.compile(r"^-\s+\S+(?:\s+\[[^\]]*\])?\s+(.*)$")
+        for line in lp.read_text(encoding="utf-8").splitlines():
+            m = pat.match(line)
+            if not m:
+                continue
+            body = m.group(1).strip()
+            if body.startswith(key):
+                peers.append(body)
+        if len(peers) < GATE_WARN_CLUSTER:
+            return "pass", "", ""
+        # 公共前缀 + 尾长校验
+        s1, s2 = min(peers), max(peers)
+        i = 0
+        while i < len(s1) and i < len(s2) and s1[i] == s2[i]:
+            i += 1
+        cp = s1[:i]
+        if len(cp) < GATE_MIN_PREFIX:
+            return "pass", "", ""
+        if any(len(x) - len(cp) > GATE_MAX_TAIL for x in peers):
+            return "pass", "", ""
+        detail = f"公共前缀{len(cp)}字={cp!r}，簇{len(peers)}条，尾长≤{GATE_MAX_TAIL}"
+        if len(peers) >= GATE_BLOCK_CLUSTER:
+            return "block", "degenerate_template", detail
+        return "warn", "degenerate_template_suspect", detail
+    except Exception:
+        return "pass", "", ""      # 闸门异常不阻断写入（宁可重复，不可丢）
+
+
 def find_l1_duplicate(content: str) -> dict | None:
     """L1 事实级查重：当日 SoT 里是否已有**同内容**条目（忽略时间戳与 tags）。
 
@@ -398,6 +472,20 @@ def remember(content: str, tags: list[str] = None, event_time: str = None,
             append_ledger(prev["ref"], prev["sha"], "dup_l1_skipped", content=content)
             print(f"[remember] ⏭️ L1 已有同内容，跳过重复写入（{prev['ref']}）")
             return results
+
+    # ①' 事实价值规则闸门（2026-11-20）——一键回退：MEMORY_RULE_GATE_OFF=1
+    if os.environ.get("MEMORY_RULE_GATE_OFF") != "1":
+        verdict, reason, detail = rule_gate(content)
+        if verdict == "block":
+            _gate_log(content, reason, detail)
+            append_ledger("", "", f"gate_{reason}", content=content)
+            results["l2_status"] = f"gate_{reason}"
+            results["rule_gated"] = True
+            print(f"[remember] ⛔ 规则闸门拦下（{reason}）{detail}")
+            return results
+        if verdict == "warn":
+            _gate_log(content, reason + "[仅告警未拦]", detail)
+            print(f"[remember] ⚠️ 疑似退化模板（{detail}）—— 本次仍放行")
 
     # ① daily log（必成，失败即报错）—— P1：同时拿到 (ref, line, sha)
     loc = append_daily_log_ex(content, tags)

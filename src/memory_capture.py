@@ -235,7 +235,8 @@ def gate_log(conversation: str, reason: str, session_stem: str = ""):
 
 def load_state() -> dict:
     """加载已处理 session 的状态（v1.2：兼容旧 state 无 gate_stats 键）"""
-    defaults = {"processed_sessions": {}, "last_run": None, "gate_stats": {"total": 0, "gated": 0, "passed": 0}}
+    defaults = {"processed_sessions": {}, "session_offsets": {}, "last_run": None,
+                "gate_stats": {"total": 0, "gated": 0, "passed": 0}}
     if STATE_FILE.exists():
         try:
             data = json.loads(STATE_FILE.read_text())
@@ -324,22 +325,27 @@ def get_sessions_in_window(since_dt, until_dt, sources: str = "pi") -> list[dict
     return sorted(sessions, key=lambda d: d["mtime"])
 
 
-def extract_conversation(src, since=None, until=None) -> str:
+def extract_conversation(src, since=None, until=None, skip_lines=0) -> str:
     """从 session 源提取人机对话文本（最近 20 轮）。src 为 get_recent_sessions 描述符或 Path（兼容旧调用）。
     since/until 为 tz-aware（UTC）时，只取窗口内消息并返回全部（不截 40 行）。"""
     if isinstance(src, (str, Path)):
         src = {"kind": "jsonl", "path": Path(src)}
     if src["kind"] == "sqlite":
         return _openclaw_archive().extract_conversation(src, since, until)
-    return _conversation_from_jsonl(Path(src["path"]), since, until)
+    return _conversation_from_jsonl(Path(src["path"]), since, until, skip_lines=skip_lines)
 
 
-def _conversation_from_jsonl(filepath: Path, since=None, until=None) -> str:
+def _conversation_from_jsonl(filepath: Path, since=None, until=None, skip_lines=0) -> str:
+    """skip_lines>0 时只读该物理行之后的新增内容（增量位点，2026-11-16）。
+    起因：job 用 --hours 1 滑动窗，同一条消息在窗口内每轮都被重新提取；
+    叠加 file_hash(mtime:size) 对活跃文件必然变化 → 整段反复重提、事实重复写。"""
     lines = []
     windowed = since is not None or until is not None
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
+            for _idx, line in enumerate(f):
+                if skip_lines and _idx < skip_lines:
+                    continue
                 line = line.strip()
                 if not line:
                     continue
@@ -839,6 +845,20 @@ def file_hash(filepath: Path) -> str:
     return hashlib.md5(f"{stat.st_mtime}:{stat.st_size}".encode()).hexdigest()
 
 
+def incremental_enabled() -> bool:
+    """增量位点开关（2026-11-16）。MEMORY_CAPTURE_INCREMENTAL_OFF=1 → 回退旧全量行为。"""
+    return os.environ.get("MEMORY_CAPTURE_INCREMENTAL_OFF") != "1"
+
+
+def jsonl_line_count(filepath: Path) -> int:
+    """jsonl 物理行数（位点单位）。读失败返回 -1，调用方据此回退全量。"""
+    try:
+        with open(filepath, "rb") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return -1
+
+
 def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_sessions: int = 3,
             continue_on_error: bool = False, since: Optional[datetime] = None,
             until: Optional[datetime] = None, sources: str = "pi"):
@@ -887,7 +907,15 @@ def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_se
         if stem in state["processed_sessions"] and state["processed_sessions"][stem] == fh and not force:
             continue  # 已处理，跳过
         
-        conversation = extract_conversation(f, since, until)
+        # 增量位点（2026-11-16）：只提取上次处理位置之后的新增行
+        _off = 0
+        _total_lines = -1
+        if incremental_enabled() and f.get("kind") == "jsonl":
+            _total_lines = jsonl_line_count(Path(f["path"]))
+            _prev = (state.get("session_offsets") or {}).get(stem) or 0
+            # 文件被重写/压缩（行数变少）→ 位点失效，回退全量重扫（宁可重复，不可丢）
+            _off = _prev if (_total_lines >= 0 and _prev <= _total_lines) else 0
+        conversation = extract_conversation(f, since, until, skip_lines=_off)
         if len(conversation) < 200:
             continue
         
@@ -900,6 +928,8 @@ def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_se
             gate_log(conversation, reason, stem)
             state["gate_stats"]["gated"] = state["gate_stats"].get("gated", 0) + 1
             state["processed_sessions"][stem] = fh  # 已 gate 的也标记，避免每 30min 重复扫同一 meta-noise
+            if _total_lines >= 0:
+                state.setdefault("session_offsets", {})[stem] = _total_lines
             gated += 1
             continue
         state["gate_stats"]["passed"] = state["gate_stats"].get("passed", 0) + 1
@@ -908,6 +938,8 @@ def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_se
         if dry_run:
             print(f"  DRY RUN: 将提取事实但不写入")
             state["processed_sessions"][stem] = fh
+            if _total_lines >= 0:
+                state.setdefault("session_offsets", {})[stem] = _total_lines
             processed += 1
             continue
         
@@ -963,6 +995,8 @@ def capture(hours: float = 1, dry_run: bool = False, force: bool = False, max_se
 
         consec_fail = 0   # 提取成功→重置连续失败计数
         state["processed_sessions"][stem] = fh
+        if _total_lines >= 0:
+            state.setdefault("session_offsets", {})[stem] = _total_lines
         processed += 1
     
     # dry-run 只预览，不落 processed/gate 状态；否则正式回填会误跳过已预览会话。

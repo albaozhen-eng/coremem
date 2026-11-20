@@ -52,7 +52,12 @@ if not L.exists():
 else:
     bak = L.with_suffix(".jsonl.testbak")
     shutil.copy(L, bak)
-    TMPREF = "2099-01-01.md:77777"
+    # 2026-11-20：ref 必须**每次唯一**。原来写死 2099-01-01.md:77777，
+    # 而早先手工负控在真实账本里留下了同 ref 的 retired/ack 行 →
+    # 探针**正确地**按设计排除已退役 ref，测试却误判为「核心不变量被打破」。
+    # 是测试数据被历史污染，不是代码回归。改用时间戳+pid 保证唯一。
+    import os, time
+    TMPREF = f"2099-01-01.md:{int(time.time()) % 100000 + os.getpid() % 1000}"
     try:
         print("=== 负控1：事实源核验失败必须判红 ===")
         with open(L, "a") as f:
