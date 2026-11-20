@@ -1,0 +1,17 @@
+{
+  "checked_at": "2026-11-20T10:14:44+0800",
+  "can_delete": true,
+  "checks": [
+    {"name": "活跃 plist 引用", "blocking": false, "value": "任一非 0 即删后静默失效|0 个"},
+    {"name": "已部署脚本引用", "blocking": false, "value": "活体目录里的硬编码旧根路径|0 个"},
+    {"name": "审计用途旧根引用(参考)", "blocking": false, "value": "行内标 OC-AUDIT-REF，仅用于核查旧副本，不参与运行|2 个 openclaw-retire-gate.sh boss-regression.py"},
+    {"name": "进程持有旧根句柄", "blocking": false, "value": "需重启这些进程才会释放|0 个 "},
+    {"name": "路径修复(11-20 09:56)后写入", "blocking": false, "value": "修复后仍有写入说明还有活跃依赖|0 个文件 "},
+    {"name": "自迁移完成(11-12 21:03)累计写入(参考)", "blocking": false, "value": "历史累计，不阻塞；仅供回溯|27 个文件 "},
+    {"name": "新家数据齐全", "blocking": false, "value": "L1/L2/L3/BOSS/归档|全部就位"},
+    {"name": "PlugMem 服务", "blocking": false, "value": "L2 读写依赖|ok"},
+    {"name": "迁移任务健康", "blocking": false, "value": "排除迁移前即失败；在跑的历史非0码不阻塞|无当前失败"},
+    {"name": "历史非0但在跑(参考)", "blocking": false, "value": "已恢复运行；历史退出码仅供回溯|4 个 com.lealway.plugmem-tunnel(历史rc=255,在跑) com.lealway.qm-core-tunnel(历史rc=255,在跑) com.lealway.qm-mcp-tunnel(历史rc=255,在跑) com.lealway.weknora-tunnel(历史rc=255,在跑)"},
+    {"name": "非0但属业务判定(参考)", "blocking": false, "value": "任务正常完成并如实报告业务不健康，非迁移故障|4 个 ai.boss.daily(rc=1,业务判定) ai.boss.recommend-greet(rc=1,业务判定) ai.boss.sender-health(rc=1,业务判定) ai.boss.recommend-greet(rc=1,业务判定)"}
+  ]
+}

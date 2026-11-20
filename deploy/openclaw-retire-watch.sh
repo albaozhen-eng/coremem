@@ -46,14 +46,28 @@ echo "[$(ts)] rc=$RC due=$IS_DUE($DUE_DATE) $SUM" >> "$LOG"
 
 NOTIFY="$H/.coremem/scripts/notify.py"
 if [ "$RC" = "0" ]; then
-  MSG="OpenClaw 观察期已满（$DUE_DATE），删除前置闸门全部通过。
+  MSG="OpenClaw 观察期已满（${DUE_DATE}），删除前置闸门全部通过。
 建议先重命名观察一天，确认无异常再彻底清理：
   mv ~/.openclaw ~/.openclaw.retired
 闸门：bash $GATE"
 else
-  MSG="OpenClaw 观察期已满（$DUE_DATE），但闸门仍有阻塞项：
+  MSG="OpenClaw 观察期已满（${DUE_DATE}），但闸门仍有阻塞项：
 $SUM
 逐项处理后重跑：bash $GATE"
 fi
-[ -f "$NOTIFY" ] && /usr/bin/python3 "$NOTIFY" "$MSG" >>"$LOG" 2>&1
+# 2026-11-20 修：原实现到期后**每天重复推送**直到退役为止 —— 又一个刷屏源。
+# 里程碑通知只该响一次；此后仅在**结论发生变化**（绿↔红）时再响。
+# 这与 memory_health 删推送的理由一致：无值班场景下重复提醒无行动价值。
+# 状态记在 .retire-notify-state，内容为本轮结论（green/red）。
+NST="$H/.coremem/health/.retire-notify-state"
+CUR=$([ "$RC" = "0" ] && echo green || echo red)
+PREV=$(cat "$NST" 2>/dev/null || echo "")
+if [ "$CUR" != "$PREV" ]; then
+    if [ -f "$NOTIFY" ]; then
+        /usr/bin/python3 "$NOTIFY" "$MSG" >>"$LOG" 2>&1 && printf '%s' "$CUR" > "$NST"
+    fi
+    echo "[$(ts)] 结论变化 $PREV → ${CUR}，已通知一次" >> "$LOG"
+else
+    echo "[$(ts)] 结论未变（${CUR}），不重复通知" >> "$LOG"
+fi
 exit "$RC"
